@@ -544,16 +544,27 @@ impl DataType {
         matches!(self, Int16 | Int32 | Int64)
     }
 
-    /// Returns true if this type is nested (List, FixedSizeList, LargeList, Struct, Union,
-    /// or Map), or a dictionary of a nested type
+    /// Returns true if this type is nested (List, FixedSizeList, LargeList, ListView, LargeListView,
+    /// Struct, Union, or Map), or a dictionary of a nested type.
     #[inline]
     pub fn is_nested(&self) -> bool {
         use DataType::*;
         match self {
             Dictionary(_, v) => DataType::is_nested(v.as_ref()),
-            List(_) | FixedSizeList(_, _) | LargeList(_) | Struct(_) | Union(_, _) | Map(_, _) => {
-                true
-            }
+            List(_) | FixedSizeList(_, _) | LargeList(_) | ListView(_) | LargeListView(_) => true,
+            Struct(_) | Union(_, _) | Map(_, _) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this type is a list type (List, FixedSizeList, LargeList, ListView, LargeListView),
+    /// or a dictionary of a list type.
+    #[inline]
+    pub fn is_list(&self) -> bool {
+        use DataType::*;
+        match self {
+            Dictionary(_, v) => DataType::is_list(v.as_ref()),
+            List(_) | FixedSizeList(_, _) | LargeList(_) | ListView(_) | LargeListView(_) => true,
             _ => false,
         }
     }
