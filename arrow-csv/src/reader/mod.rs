@@ -163,9 +163,12 @@
 //! ```
 //!
 
+#[cfg(feature = "encoding_rs")]
+mod encoding;
 mod records;
 
 use arrow_array::builder::{NullBuilder, PrimitiveBuilder};
+use arrow_array::timezone::Tz;
 use arrow_array::types::*;
 use arrow_array::*;
 use arrow_cast::parse::{Parser, parse_decimal, string_to_datetime};
@@ -179,8 +182,13 @@ use std::io::{BufRead, BufReader as StdBufReader, Read};
 use std::sync::{Arc, LazyLock};
 
 use crate::map_csv_error;
-use crate::reader::records::{RecordDecoder, StringRecords};
-use arrow_array::timezone::Tz;
+#[cfg(feature = "encoding_rs")]
+use crate::reader::encoding::buffer::Buffer;
+#[cfg(feature = "encoding_rs")]
+use crate::reader::encoding::CharsetDecoderReader;
+#[cfg(feature = "encoding_rs")]
+use encoding::CharsetDecoder;
+use records::{RecordDecoder, StringRecords};
 
 /// Order should match [`InferredDataType`]
 static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
@@ -280,6 +288,8 @@ pub struct Format {
     comment: Option<u8>,
     null_regex: NullRegex,
     truncated_rows: bool,
+    #[cfg(feature = "encoding_rs")]
+    encoding: Option<&'static encoding_rs::Encoding>,
 }
 
 impl Format {
@@ -337,6 +347,13 @@ impl Format {
     /// will still return an error.
     pub fn with_truncated_rows(mut self, allow: bool) -> Self {
         self.truncated_rows = allow;
+        self
+    }
+
+    /// Specify the character encoding, defaults to `None` (UTF-8)
+    #[cfg(feature = "encoding_rs")]
+    pub fn with_encoding(mut self, encoding: &'static encoding_rs::Encoding) -> Self {
+        self.encoding = Some(encoding).filter(|enc| *enc != encoding_rs::UTF_8);
         self
     }
 
@@ -401,11 +418,13 @@ impl Format {
     }
 
     /// Build a [`csv::Reader`] for this [`Format`]
-    fn build_reader<R: Read>(&self, reader: R) -> csv::Reader<R> {
+    fn build_reader<R: Read>(&self, reader: R) -> csv::Reader<impl Read> {
+        #[cfg(feature = "encoding_rs")]
+        let reader = CharsetDecoderReader::new(reader, self.encoding);
+
         let mut builder = csv::ReaderBuilder::new();
         builder.has_headers(self.header);
         builder.flexible(self.truncated_rows);
-
         if let Some(c) = self.delimiter {
             builder.delimiter(c);
         }
@@ -419,6 +438,7 @@ impl Format {
         if let Some(comment) = self.comment {
             builder.comment(Some(comment));
         }
+
         builder.from_reader(reader)
     }
 
@@ -619,6 +639,10 @@ pub struct Decoder {
     /// A decoder for [`StringRecords`]
     record_decoder: RecordDecoder,
 
+    /// Character set decoder and buffer
+    #[cfg(feature = "encoding_rs")]
+    charset: Option<(CharsetDecoder, Buffer)>,
+
     /// Check if the string matches this pattern for `NULL`.
     null_regex: NullRegex,
 }
@@ -627,8 +651,8 @@ impl Decoder {
     /// Decode records from `buf` returning the number of bytes read
     ///
     /// This method returns once `batch_size` objects have been parsed since the
-    /// last call to [`Self::flush`], or `buf` is exhausted. Any remaining bytes
-    /// should be included in the next call to [`Self::decode`]
+    /// last call to [`Self::flush`], or `buf` is exhausted, but may also return earlier.
+    /// Any remaining bytes should be included in the next call to [`Self::decode`]
     ///
     /// There is no requirement that `buf` contains a whole number of records, facilitating
     /// integration with arbitrary byte streams, such as that yielded by [`BufRead`] or
@@ -637,15 +661,58 @@ impl Decoder {
         if self.to_skip != 0 {
             // Skip in units of `to_read` to avoid over-allocating buffers
             let to_skip = self.to_skip.min(self.batch_size);
-            let (skipped, bytes) = self.record_decoder.decode(buf, to_skip)?;
+            let (skipped, bytes) = self.decode_inner(buf, to_skip)?;
             self.to_skip -= skipped;
             self.record_decoder.clear();
             return Ok(bytes);
         }
 
         let to_read = self.batch_size.min(self.end - self.line_number) - self.record_decoder.len();
-        let (_, bytes) = self.record_decoder.decode(buf, to_read)?;
+        let (_, bytes) = self.decode_inner(buf, to_read)?;
         Ok(bytes)
+    }
+
+    /// Decodes records from `input` returning the number of records and bytes read
+    ///
+    /// Note: this expects to be called with an empty `input` to signal EOF
+    pub fn decode_inner(
+        &mut self,
+        input: &[u8],
+        to_read: usize,
+    ) -> Result<(usize, usize), ArrowError> {
+        #[cfg(feature = "encoding_rs")]
+        if let Some((decoder, buffer)) = &mut self.charset {
+            let mut total_records = 0;
+            let mut total_bytes = 0;
+            let last = input.is_empty();
+
+            if !buffer.is_empty() || decoder.is_eof() {
+                let (records, bytes) = self.record_decoder.decode(buffer.read_buf(), to_read)?;
+                total_records += records;
+                buffer.consume(bytes);
+            }
+
+            while total_records < to_read {
+                buffer.backshift();
+
+                let rem = &input[total_bytes..];
+                let (read, written) = decoder.decode(rem, buffer.write_buf(), last);
+                total_bytes += read;
+                buffer.advance(written);
+
+                if written == 0 {
+                    break;
+                }
+
+                let (records, bytes) = self.record_decoder.decode(buffer.read_buf(), to_read)?;
+                total_records += records;
+                buffer.consume(bytes);
+            }
+
+            return Ok((total_records, total_bytes));
+        }
+
+        self.record_decoder.decode(input, to_read)
     }
 
     /// Flushes the currently buffered data to a [`RecordBatch`]
@@ -1226,6 +1293,13 @@ impl ReaderBuilder {
         self
     }
 
+    /// Specify the character encoding, defaults to `None` (UTF-8)
+    #[cfg(feature = "encoding_rs")]
+    pub fn with_encoding(mut self, encoding: &'static encoding_rs::Encoding) -> Self {
+        self.format.encoding = Some(encoding).filter(|enc| *enc != encoding_rs::UTF_8);
+        self
+    }
+
     /// Create a new `Reader` from a non-buffered reader
     ///
     /// If `R: BufRead` consider using [`Self::build_buffered`] to avoid unnecessary additional
@@ -1258,10 +1332,18 @@ impl ReaderBuilder {
             None => (header, usize::MAX),
         };
 
+        #[cfg(feature = "encoding_rs")]
+        let charset_decoder = self
+            .format
+            .encoding
+            .map(|enc| (CharsetDecoder::new(enc), Buffer::with_capacity(8 * 1024)));
+
         Decoder {
             schema: self.schema,
             to_skip: start,
             record_decoder,
+            #[cfg(feature = "encoding_rs")]
+            charset: charset_decoder,
             line_number: start,
             end,
             projection: self.projection,
@@ -2554,6 +2636,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[cfg(feature = "encoding_rs")]
+    fn test_windows_1252_encoding() {
+        let path = "test/data/windows_1252.csv";
+
+        let (schema, _) = Format::default()
+            .with_header(true)
+            .with_encoding(encoding_rs::WINDOWS_1252)
+            .infer_schema(File::open(path).unwrap(), None)
+            .unwrap();
+        let schema = Arc::new(schema);
+
+        let reader = ReaderBuilder::new(schema.clone())
+            .with_header(true)
+            .with_encoding(encoding_rs::WINDOWS_1252)
+            .build(File::open(path).unwrap())
+            .unwrap();
+
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+
+        let names: &StringArray = batches[0].column(0).as_any().downcast_ref().unwrap();
+        assert_eq!(names.value(0), "José");
+        assert_eq!(names.value(1), "François");
+        assert_eq!(names.value(2), "Møller");
     }
 
     fn err_test(csv: &[u8], expected: &str) {
