@@ -43,8 +43,6 @@ impl CharsetDecoder {
 
         if last && result == CoderResult::InputEmpty {
             self.eof = true;
-        } else {
-            debug_assert!(written > 0);
         }
 
         (read, written)
