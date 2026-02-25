@@ -183,11 +183,7 @@ use std::sync::{Arc, LazyLock};
 
 use crate::map_csv_error;
 #[cfg(feature = "encoding_rs")]
-use crate::reader::encoding::buffer::Buffer;
-#[cfg(feature = "encoding_rs")]
-use crate::reader::encoding::CharsetDecoderReader;
-#[cfg(feature = "encoding_rs")]
-use encoding::CharsetDecoder;
+use encoding::{BufferedCharsetDecoder, CharsetDecoderReader};
 use records::{RecordDecoder, StringRecords};
 
 /// Order should match [`InferredDataType`]
@@ -641,7 +637,7 @@ pub struct Decoder {
 
     /// Character set decoder and buffer
     #[cfg(feature = "encoding_rs")]
-    charset: Option<(CharsetDecoder, Buffer)>,
+    charset: Option<BufferedCharsetDecoder>,
 
     /// Check if the string matches this pattern for `NULL`.
     null_regex: NullRegex,
@@ -681,37 +677,33 @@ impl Decoder {
         to_read: usize,
     ) -> Result<(usize, usize), ArrowError> {
         #[cfg(feature = "encoding_rs")]
-        if let Some((decoder, buffer)) = &mut self.charset {
+        if let Some(charset) = &mut self.charset {
             let mut total_records = 0;
             let mut total_bytes = 0;
             let last = input.is_empty();
 
-            if !buffer.is_empty() {
-                let (records, bytes) = self.record_decoder.decode(buffer.read_buf(), to_read)?;
+            if !charset.is_empty() {
+                let (records, bytes) = self.record_decoder.decode(charset.buf(), to_read)?;
                 total_records += records;
-                buffer.consume(bytes);
+                charset.consume(bytes);
             }
 
             while total_records < to_read {
-                buffer.backshift();
-
-                let rem = &input[total_bytes..];
-                let (read, written, input_empty) = decoder.decode(rem, buffer.write_buf(), last);
+                let (read, written, input_empty) = charset.fill(&input[total_bytes..], last);
                 total_bytes += read;
-                buffer.advance(written);
 
                 // Exit the loop if the charset decoder made no progress,
                 // UNLESS it has reached the end of the file, in which case the record decoder
                 // needs to be passed an empty input to flush the final csv record
-                if written == 0 && !decoder.is_eof() {
+                if written == 0 && !charset.is_eof() {
                     break;
                 }
 
                 let (records, bytes) = self
                     .record_decoder
-                    .decode(buffer.read_buf(), to_read - total_records)?;
+                    .decode(charset.buf(), to_read - total_records)?;
                 total_records += records;
-                buffer.consume(bytes);
+                charset.consume(bytes);
 
                 if input_empty {
                     break;
@@ -1345,7 +1337,7 @@ impl ReaderBuilder {
         let charset_decoder = self
             .format
             .encoding
-            .map(|enc| (CharsetDecoder::new(enc), Buffer::with_capacity(8 * 1024)));
+            .map(|enc| BufferedCharsetDecoder::new(enc));
 
         Decoder {
             schema: self.schema,

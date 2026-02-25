@@ -20,6 +20,11 @@ use std::io::{BufRead, BufReader, Read};
 
 use encoding_rs::{CoderResult, Decoder, Encoding};
 
+use buffer::Buffer;
+
+/// Default capacity of the buffer used to decode non-UTF-8 charset streams
+static DECODE_BUFFER_CAP: usize = 8 * 1024;
+
 /// A decoder that converts a byte stream into UTF-8
 pub struct CharsetDecoder {
     decoder: Decoder,
@@ -65,6 +70,57 @@ impl Debug for CharsetDecoder {
             .field("decoder", self.decoder.encoding())
             .field("eof", &self.eof)
             .finish()
+    }
+}
+
+/// A decoder that converts a byte stream into UTF-8,
+/// with a fixed-size internal buffer
+#[derive(Debug)]
+pub struct BufferedCharsetDecoder {
+    decoder: CharsetDecoder,
+    buffer: Buffer,
+}
+
+impl BufferedCharsetDecoder {
+    /// Creates a new `BufferedCharsetDecoder` with default capacity
+    pub fn new(encoding: &'static Encoding) -> Self {
+        Self {
+            decoder: CharsetDecoder::new(encoding),
+            buffer: Buffer::with_capacity(DECODE_BUFFER_CAP),
+        }
+    }
+
+    /// Whether the internal buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Returns the contents of the internal buffer
+    pub fn buf(&self) -> &[u8] {
+        self.buffer.read_buf()
+    }
+
+    /// Consumes `amount` bytes in the internal buffer, marking them as read
+    pub fn consume(&mut self, amount: usize) {
+        self.buffer.consume(amount);
+    }
+
+    /// Fills the internal buffer by decoding bytes from `input`,
+    /// returning the number of bytes read, the number of bytes written,
+    /// and a boolean indicating whether more input is needed to make progress
+    pub fn fill(&mut self, input: &[u8], last: bool) -> (usize, usize, bool) {
+        self.buffer.backshift();
+
+        let buf = self.buffer.write_buf();
+        let (read, written, input_empty) = self.decoder.decode(input, buf, last);
+        self.buffer.advance(written);
+
+        (read, written, input_empty)
+    }
+
+    /// Returns `true` if the decoder is finished and all bytes have been written out
+    pub fn is_eof(&self) -> bool {
+        self.decoder.is_eof()
     }
 }
 
