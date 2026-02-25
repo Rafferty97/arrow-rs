@@ -36,11 +36,11 @@ impl CharsetDecoder {
         }
     }
 
-    /// Decodes bytes in `input` and writes them to `output`,
-    /// returning the number of bytes read and bytes written
-    pub fn decode(&mut self, input: &[u8], output: &mut [u8], last: bool) -> (usize, usize) {
+    /// Decodes bytes in `input` and writes them to `output`, returning the number of bytes read,
+    /// the number of bytes written, and whether more input is needed to make progress
+    pub fn decode(&mut self, input: &[u8], output: &mut [u8], last: bool) -> (usize, usize, bool) {
         if self.eof {
-            return (0, 0);
+            return (0, 0, true);
         }
 
         let (result, read, written, _) = self.decoder.decode_to_utf8(input, output, last);
@@ -49,7 +49,7 @@ impl CharsetDecoder {
             self.eof = true;
         }
 
-        (read, written)
+        (read, written, result == CoderResult::InputEmpty)
     }
 
     /// Returns `true` if the decoder is finished and all bytes have been written out
@@ -91,7 +91,7 @@ impl<R: BufRead> Read for CharsetDecoderReader<R> {
         };
 
         let src = self.reader.fill_buf()?;
-        let (read, written) = decoder.decode(src, buf, src.is_empty());
+        let (read, written, _) = decoder.decode(src, buf, src.is_empty());
 
         self.reader.consume(read);
 
