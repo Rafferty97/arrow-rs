@@ -181,10 +181,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader as StdBufReader, Read};
 use std::sync::{Arc, LazyLock};
 
-use crate::map_csv_error;
 #[cfg(feature = "encoding_rs")]
-use encoding::{BufferedCharsetDecoder, CharsetDecoderReader};
-use records::{RecordDecoder, StringRecords};
+use self::encoding::{BufferedCharsetDecoder, CharsetDecoderReader};
+use self::records::{RecordDecoder, StringRecords};
+use crate::map_csv_error;
 
 /// Order should match [`InferredDataType`]
 static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
