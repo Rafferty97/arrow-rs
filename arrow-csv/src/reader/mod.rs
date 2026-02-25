@@ -2711,7 +2711,6 @@ mod tests {
 
             for batch_size in [1, 4, 1024] {
                 for capacity in [1, 3, 7, 100] {
-                    println!("{path}, {batch_size}, {capacity}");
                     let reader = ReaderBuilder::new(schema.clone())
                         .with_batch_size(batch_size)
                         .with_header(true)
