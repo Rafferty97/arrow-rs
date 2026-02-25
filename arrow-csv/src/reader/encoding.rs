@@ -20,13 +20,15 @@ use std::io::{BufRead, BufReader, Read};
 
 use encoding_rs::{CoderResult, Decoder, Encoding};
 
-/// A converter that decodes a byte stream into UTF-8
+/// A decoder that converts a byte stream into UTF-8
 pub struct CharsetDecoder {
     decoder: Decoder,
     eof: bool,
 }
 
 impl CharsetDecoder {
+    /// Creates a new `CharsetDecoder` that decodes bytes in the
+    /// specified encoding into UTF-8 bytes
     pub fn new(encoding: &'static Encoding) -> Self {
         Self {
             decoder: Encoding::new_decoder(encoding),
@@ -34,6 +36,8 @@ impl CharsetDecoder {
         }
     }
 
+    /// Decodes bytes in `input` and writes them to `output`,
+    /// returning the number of bytes read and bytes written
     pub fn decode(&mut self, input: &[u8], output: &mut [u8], last: bool) -> (usize, usize) {
         if self.eof {
             return (0, 0);
@@ -48,6 +52,7 @@ impl CharsetDecoder {
         (read, written)
     }
 
+    /// Returns `true` if the decoder is finished and all bytes have been written out
     pub fn is_eof(&self) -> bool {
         self.eof
     }
@@ -64,7 +69,7 @@ impl Debug for CharsetDecoder {
 }
 
 /// A wrapper around a reader that optionally converts from a
-/// non-UTF-8 character encoding to UTF-8.
+/// specified character encoding to UTF-8 bytes
 pub struct CharsetDecoderReader<R> {
     reader: R,
     decoder: Option<CharsetDecoder>,

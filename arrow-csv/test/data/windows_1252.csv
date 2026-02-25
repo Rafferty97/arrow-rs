@@ -1,4 +1,101 @@
-Name/Nom,City/Cité,Description
-José,Málaga,Café owner
-François,Zürich,Crème brûlée chef
-Møller,København,Smörgåsbord specialist
+ID,Name,Price,Description,Notes
+001,Ôkubo,$498.18,Jalapeño & habanero mix ½ cup,Ö-grade quality ?
+002,Ÿves,$836.92,Jalapeño & habanero mix ½ cup,Expires: 31/12/2025 — handle w/ care
+003,Ångström,¥618.14,Ångström-level precision ±0.1,Pack of 3 × 200g
+004,?apek,¥9.46,Naïve approach • simple & effective,Bespoke • hand-crafted in ÉU
+005,García,£329.62,Résumé with €500 bonus,½ price sale — limited time
+006,?apek,$37.25,Naïve approach • simple & effective,½ price sale — limited time
+007,Ôkubo,¢356.18,Ångström-level precision ±0.1,Expires: 31/12/2025 — handle w/ care
+008,Ÿves,¢134.24,Bjørn's ø-shaped island retreat,Ö-grade quality ?
+009,?ukasz,£178.58,"100% pure & ""natural"" flavor",Pack of 3 × 200g
+010,Ögün,£477.24,Résumé with €500 bonus,§14 compliance certified
+011,Héloïse,€867.78,Ångström-level precision ±0.1,Discontinued — last units
+012,?ukasz,¥542.49,"100% pure & ""natural"" flavor",Award-winning… 2023 & 2024
+013,Françoise,¥67.30,Ñoño café con leche ¡Olé!,Discontinued — last units
+014,Ôkubo,£603.58,Naïve approach • simple & effective,Ö-grade quality ?
+015,Françoise,€609.84,Straße und Plätze — Berlin,Ö-grade quality ?
+016,Françoise,¢502.11,Ångström-level precision ±0.1,§14 compliance certified
+017,Ïlse,£834.10,"100% pure & ""natural"" flavor",Pack of 3 × 200g
+018,Ÿves,€339.49,Crème brûlée — a classic dessert,½ price sale — limited time
+019,Ïlse,$70.91,"100% pure & ""natural"" flavor",Made in Deutschland® since 1887
+020,Björk,$448.32,Straße und Plätze — Berlin,Made in Deutschland® since 1887
+021,?ukasz,¢158.13,Ré-édition « collector »,§14 compliance certified
+022,Ångström,$395.32,Tête-à-tête… a cozy 'bistro',Prêt-à-porter — size M/L
+023,Ögün,¥459.78,Jalapeño & habanero mix ½ cup,Made in Deutschland® since 1887
+024,Ñoño,¥897.04,Ré-édition « collector »,Allergen: contains gluten & soy
+025,Ögün,$613.18,Ångström-level precision ±0.1,§14 compliance certified
+026,Ünsal,£740.99,Ångström-level precision ±0.1,½ price sale — limited time
+027,García,€58.87,Bjørn's ø-shaped island retreat,§14 compliance certified
+028,Ñoño,€689.30,Ñoño café con leche ¡Olé!,Expires: 31/12/2025 — handle w/ care
+029,García,$903.71,Über-fast ™ processing,Discontinued — last units
+030,Ünsal,£768.60,Ré-édition « collector »,Bespoke • hand-crafted in ÉU
+031,Søren,$316.42,Ångström-level precision ±0.1,§14 compliance certified
+032,Ïlse,$526.13,Jalapeño & habanero mix ½ cup,Made in Deutschland® since 1887
+033,Ïlse,¢204.08,Bjørn's ø-shaped island retreat,§14 compliance certified
+034,?ukasz,€762.94,Résumé with €500 bonus,In stock • ships in 24h
+035,Ögün,¢471.08,Tête-à-tête… a cozy 'bistro',Award-winning… 2023 & 2024
+036,Thérèse,¥379.94,Straße und Plätze — Berlin,New™ improved formula
+037,García,£578.79,Côte d'Azur – sunny & warm,In stock • ships in 24h
+038,Søren,€984.62,Bjørn's ø-shaped island retreat,§14 compliance certified
+039,Müller,¥806.56,Tête-à-tête… a cozy 'bistro',Pack of 3 × 200g
+040,Björk,£218.43,Ñoño café con leche ¡Olé!,Made in Deutschland® since 1887
+041,Thérèse,¢147.31,Naïve approach • simple & effective,Made in Deutschland® since 1887
+042,Müller,€76.70,Straße und Plätze — Berlin,Pack of 3 × 200g
+043,Müller,¥722.42,Tête-à-tête… a cozy 'bistro',§14 compliance certified
+044,Ôkubo,¥893.81,Ré-édition « collector »,Award-winning… 2023 & 2024
+045,Thérèse,£943.16,Œuvre complète • édition de luxe,Ö-grade quality ?
+046,Ÿves,£406.47,Ñoño café con leche ¡Olé!,½ price sale — limited time
+047,Thérèse,¥679.78,Côte d'Azur – sunny & warm,Expires: 31/12/2025 — handle w/ care
+048,Björk,€796.01,"Fine dining: prix fixe ¥3,000",Prêt-à-porter — size M/L
+049,Ünsal,¥568.10,"Fine dining: prix fixe ¥3,000",Made in Deutschland® since 1887
+050,Müller,£513.81,Côte d'Azur – sunny & warm,In stock • ships in 24h
+051,Søren,$715.34,Ñoño café con leche ¡Olé!,Caution: ?65°C surface temp
+052,Ädel,¥342.46,Tête-à-tête… a cozy 'bistro',New™ improved formula
+053,Ädel,¢650.20,"Fine dining: prix fixe ¥3,000",Ö-grade quality ?
+054,García,€471.00,Œuvre complète • édition de luxe,Made in Deutschland® since 1887
+055,Thérèse,¢707.97,Crème brûlée — a classic dessert,Ö-grade quality ?
+056,Björk,£888.87,"Fine dining: prix fixe ¥3,000",Award-winning… 2023 & 2024
+057,Jürgen,¥991.79,Über-fast ™ processing,Bespoke • hand-crafted in ÉU
+058,Søren,¥965.75,Résumé with €500 bonus,New™ improved formula
+059,Ünsal,¢356.75,Straße und Plätze — Berlin,New™ improved formula
+060,Müller,£544.90,Naïve approach • simple & effective,Spécial édition — tirage limité
+061,Ñoño,¢627.28,Résumé with €500 bonus,§14 compliance certified
+062,Müller,$469.89,Tête-à-tête… a cozy 'bistro',Ö-grade quality ?
+063,Françoise,£966.55,Tête-à-tête… a cozy 'bistro',Discontinued — last units
+064,Ångström,€534.09,Œuvre complète • édition de luxe,Allergen: contains gluten & soy
+065,Ädel,$321.27,Côte d'Azur – sunny & warm,Award-winning… 2023 & 2024
+066,García,$470.60,"Fine dining: prix fixe ¥3,000",New™ improved formula
+067,Thérèse,¥212.43,Jalapeño & habanero mix ½ cup,Spécial édition — tirage limité
+068,Ïlse,£776.50,"100% pure & ""natural"" flavor",§14 compliance certified
+069,Søren,¢992.98,Ångström-level precision ±0.1,§14 compliance certified
+070,?ukasz,£677.91,"100% pure & ""natural"" flavor",Caution: ?65°C surface temp
+071,?apek,¥696.37,Bjørn's ø-shaped island retreat,Spécial édition — tirage limité
+072,?ukasz,$685.59,Résumé with €500 bonus,Caution: ?65°C surface temp
+073,Ögün,¥200.39,Ångström-level precision ±0.1,Bespoke • hand-crafted in ÉU
+074,Müller,¢713.30,Straße und Plätze — Berlin,Bespoke • hand-crafted in ÉU
+075,García,£30.61,Tête-à-tête… a cozy 'bistro',Caution: ?65°C surface temp
+076,Thérèse,€340.00,Œuvre complète • édition de luxe,Made in Deutschland® since 1887
+077,Ôkubo,€78.46,Résumé with €500 bonus,Spécial édition — tirage limité
+078,Björk,£982.59,Ångström-level precision ±0.1,Discontinued — last units
+079,Søren,$531.77,Ñoño café con leche ¡Olé!,Bespoke • hand-crafted in ÉU
+080,Jürgen,£420.75,Ré-édition « collector »,Bespoke • hand-crafted in ÉU
+081,Ôkubo,¢805.84,Crème brûlée — a classic dessert,Caution: ?65°C surface temp
+082,Ÿves,$591.37,Straße und Plätze — Berlin,In stock • ships in 24h
+083,Ÿves,£359.10,Straße und Plätze — Berlin,§14 compliance certified
+084,Ÿves,$594.33,"100% pure & ""natural"" flavor",Discontinued — last units
+085,García,€89.48,Ré-édition « collector »,Pack of 3 × 200g
+086,Thérèse,¥634.49,Ñoño café con leche ¡Olé!,Award-winning… 2023 & 2024
+087,Søren,¥190.21,Ñoño café con leche ¡Olé!,Caution: ?65°C surface temp
+088,Ÿves,¢383.91,Straße und Plätze — Berlin,Expires: 31/12/2025 — handle w/ care
+089,Ångström,£974.28,Naïve approach • simple & effective,Bespoke • hand-crafted in ÉU
+090,Ïlse,£392.07,Naïve approach • simple & effective,Bespoke • hand-crafted in ÉU
+091,Ïlse,$968.31,"100% pure & ""natural"" flavor",Award-winning… 2023 & 2024
+092,Ÿves,$999.53,Résumé with €500 bonus,New™ improved formula
+093,?apek,£439.93,Ré-édition « collector »,Made in Deutschland® since 1887
+094,Müller,$864.53,Ré-édition « collector »,½ price sale — limited time
+095,?ukasz,£978.06,Straße und Plätze — Berlin,Bespoke • hand-crafted in ÉU
+096,Ünsal,€101.50,"Fine dining: prix fixe ¥3,000",Award-winning… 2023 & 2024
+097,?ukasz,¢715.04,Ångström-level precision ±0.1,½ price sale — limited time
+098,Björk,$386.71,Côte d'Azur – sunny & warm,Bespoke • hand-crafted in ÉU
+099,Jürgen,€779.60,Crème brûlée — a classic dessert,Caution: ?65°C surface temp
+100,Søren,¥734.46,Tête-à-tête… a cozy 'bistro',§14 compliance certified

@@ -692,7 +692,7 @@ impl Decoder {
                 buffer.consume(bytes);
             }
 
-            while total_records < to_read {
+            while total_records < to_read && !decoder.is_eof() {
                 buffer.backshift();
 
                 let rem = &input[total_bytes..];
@@ -700,11 +700,16 @@ impl Decoder {
                 total_bytes += read;
                 buffer.advance(written);
 
-                if written == 0 {
+                // Exit the loop if the charset decoder made no progress,
+                // UNLESS it has just reached eof, in which case the record decoder
+                // needs to be passed an empty input to flush the final csv record
+                if written == 0 && !decoder.is_eof() {
                     break;
                 }
 
-                let (records, bytes) = self.record_decoder.decode(buffer.read_buf(), to_read)?;
+                let (records, bytes) = self
+                    .record_decoder
+                    .decode(buffer.read_buf(), to_read - total_records)?;
                 total_records += records;
                 buffer.consume(bytes);
             }
@@ -2653,16 +2658,112 @@ mod tests {
         let reader = ReaderBuilder::new(schema.clone())
             .with_header(true)
             .with_encoding(encoding_rs::WINDOWS_1252)
+            .with_batch_size(1024)
             .build(File::open(path).unwrap())
             .unwrap();
 
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(batches.len(), 1);
 
-        let names: &StringArray = batches[0].column(0).as_any().downcast_ref().unwrap();
-        assert_eq!(names.value(0), "José");
-        assert_eq!(names.value(1), "François");
-        assert_eq!(names.value(2), "Møller");
+        let names: &StringArray = batches[0].column(1).as_any().downcast_ref().unwrap();
+        assert_eq!(names.value(0), "Ôkubo");
+        assert_eq!(names.value(1), "Ÿves");
+        assert_eq!(names.value(2), "Ångström");
+    }
+
+    #[test]
+    #[cfg(feature = "encoding_rs")]
+    fn test_windows_1252_encoding_buffered() {
+        let path = "test/data/windows_1252.csv";
+        let expected_rows = 100;
+
+        let (schema, _) = Format::default()
+            .with_header(true)
+            .with_encoding(encoding_rs::WINDOWS_1252)
+            .infer_schema(File::open(path).unwrap(), None)
+            .unwrap();
+        let schema = Arc::new(schema);
+
+        for batch_size in [1, 4] {
+            for capacity in [1, 3, 7, 100] {
+                let reader = ReaderBuilder::new(schema.clone())
+                    .with_batch_size(batch_size)
+                    .with_header(true)
+                    .with_encoding(encoding_rs::WINDOWS_1252)
+                    .build(File::open(path).unwrap())
+                    .unwrap();
+
+                let expected = reader.collect::<Result<Vec<_>, _>>().unwrap();
+
+                assert_eq!(
+                    expected.iter().map(|x| x.num_rows()).sum::<usize>(),
+                    expected_rows
+                );
+
+                let buffered =
+                    std::io::BufReader::with_capacity(capacity, File::open(path).unwrap());
+
+                let reader = ReaderBuilder::new(schema.clone())
+                    .with_batch_size(batch_size)
+                    .with_header(true)
+                    .with_encoding(encoding_rs::WINDOWS_1252)
+                    .build_buffered(buffered)
+                    .unwrap();
+
+                let actual = reader.collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(expected, actual)
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "encoding_rs")]
+    fn test_ascii_encoding() {
+        // Although these files only contain ASCII, meaning the conversion to UTF-8 is a no-op,
+        // these tests will exercise the charset conversion machinery
+
+        let tests = [
+            ("test/data/uk_cities.csv", false, 37),
+            ("test/data/various_types.csv", true, 7),
+            ("test/data/decimal_test.csv", false, 10),
+        ];
+
+        for (path, has_header, expected_rows) in tests {
+            let (schema, _) = Format::default()
+                .infer_schema(File::open(path).unwrap(), None)
+                .unwrap();
+            let schema = Arc::new(schema);
+
+            for batch_size in [1, 4] {
+                for capacity in [1, 3, 7, 100] {
+                    let reader = ReaderBuilder::new(schema.clone())
+                        .with_batch_size(batch_size)
+                        .with_header(has_header)
+                        .with_encoding(encoding_rs::WINDOWS_1252)
+                        .build(File::open(path).unwrap())
+                        .unwrap();
+
+                    let expected = reader.collect::<Result<Vec<_>, _>>().unwrap();
+
+                    assert_eq!(
+                        expected.iter().map(|x| x.num_rows()).sum::<usize>(),
+                        expected_rows
+                    );
+
+                    let buffered =
+                        std::io::BufReader::with_capacity(capacity, File::open(path).unwrap());
+
+                    let reader = ReaderBuilder::new(schema.clone())
+                        .with_batch_size(batch_size)
+                        .with_header(has_header)
+                        .with_encoding(encoding_rs::WINDOWS_1252)
+                        .build_buffered(buffered)
+                        .unwrap();
+
+                    let actual = reader.collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(expected, actual)
+                }
+            }
+        }
     }
 
     fn err_test(csv: &[u8], expected: &str) {
