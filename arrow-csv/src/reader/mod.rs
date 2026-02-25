@@ -1334,10 +1334,7 @@ impl ReaderBuilder {
         };
 
         #[cfg(feature = "encoding_rs")]
-        let charset_decoder = self
-            .format
-            .encoding
-            .map(|enc| BufferedCharsetDecoder::new(enc));
+        let charset_decoder = self.format.encoding.map(BufferedCharsetDecoder::new);
 
         Decoder {
             schema: self.schema,
