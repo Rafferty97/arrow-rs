@@ -15,194 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
-use indexmap::map::IndexMap as HashMap;
-use indexmap::set::IndexSet as HashSet;
-use serde_json::Value;
 use std::borrow::Borrow;
 use std::io::{BufRead, Seek};
-use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-enum InferredType {
-    Scalar(HashSet<DataType>),
-    Array(Box<InferredType>),
-    Object(HashMap<String, InferredType>),
-    Any,
-}
+use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
+use bumpalo::Bump;
+use indexmap::IndexMap;
+use serde_json::Value;
 
-impl InferredType {
-    fn merge(&mut self, other: InferredType) -> Result<(), ArrowError> {
-        match (self, other) {
-            (InferredType::Array(s), InferredType::Array(o)) => {
-                s.merge(*o)?;
-            }
-            (InferredType::Scalar(self_hs), InferredType::Scalar(other_hs)) => {
-                other_hs.into_iter().for_each(|v| {
-                    self_hs.insert(v);
-                });
-            }
-            (InferredType::Object(self_map), InferredType::Object(other_map)) => {
-                for (k, v) in other_map {
-                    self_map.entry(k).or_insert(InferredType::Any).merge(v)?;
-                }
-            }
-            (s @ InferredType::Any, v) => {
-                *s = v;
-            }
-            (_, InferredType::Any) => {}
-            // convert a scalar type to a single-item scalar array type.
-            (InferredType::Array(self_inner_type), other_scalar @ InferredType::Scalar(_)) => {
-                self_inner_type.merge(other_scalar)?;
-            }
-            (s @ InferredType::Scalar(_), InferredType::Array(mut other_inner_type)) => {
-                other_inner_type.merge(s.clone())?;
-                *s = InferredType::Array(other_inner_type);
-            }
-            // incompatible types
-            (s, o) => {
-                return Err(ArrowError::JsonError(format!(
-                    "Incompatible type found during schema inference: {s:?} v.s. {o:?}",
-                )));
-            }
-        }
+pub use self::value_iter::ValueIter;
 
-        Ok(())
-    }
-
-    fn is_none_or_any(ty: Option<&Self>) -> bool {
-        matches!(ty, Some(Self::Any) | None)
-    }
-}
-
-/// Shorthand for building list data type of `ty`
-fn list_type_of(ty: DataType) -> DataType {
-    DataType::List(Arc::new(Field::new_list_field(ty, true)))
-}
-
-/// Coerce data type during inference
-///
-/// * `Int64` and `Float64` should be `Float64`
-/// * Lists and scalars are coerced to a list of a compatible scalar
-/// * All other types are coerced to `Utf8`
-fn coerce_data_type(dt: Vec<&DataType>) -> DataType {
-    let mut dt_iter = dt.into_iter().cloned();
-    let dt_init = dt_iter.next().unwrap_or(DataType::Utf8);
-
-    dt_iter.fold(dt_init, |l, r| match (l, r) {
-        (DataType::Null, o) | (o, DataType::Null) => o,
-        (DataType::Boolean, DataType::Boolean) => DataType::Boolean,
-        (DataType::Int64, DataType::Int64) => DataType::Int64,
-        (DataType::Float64, DataType::Float64)
-        | (DataType::Float64, DataType::Int64)
-        | (DataType::Int64, DataType::Float64) => DataType::Float64,
-        (DataType::List(l), DataType::List(r)) => {
-            list_type_of(coerce_data_type(vec![l.data_type(), r.data_type()]))
-        }
-        // coerce scalar and scalar array into scalar array
-        (DataType::List(e), not_list) | (not_list, DataType::List(e)) => {
-            list_type_of(coerce_data_type(vec![e.data_type(), &not_list]))
-        }
-        _ => DataType::Utf8,
-    })
-}
-
-fn generate_datatype(t: &InferredType) -> Result<DataType, ArrowError> {
-    Ok(match t {
-        InferredType::Scalar(hs) => coerce_data_type(hs.iter().collect()),
-        InferredType::Object(spec) => DataType::Struct(generate_fields(spec)?),
-        InferredType::Array(ele_type) => list_type_of(generate_datatype(ele_type)?),
-        InferredType::Any => DataType::Null,
-    })
-}
-
-fn generate_fields(spec: &HashMap<String, InferredType>) -> Result<Fields, ArrowError> {
-    spec.iter()
-        .map(|(k, types)| Ok(Field::new(k, generate_datatype(types)?, true)))
-        .collect()
-}
-
-/// Generate schema from JSON field names and inferred data types
-fn generate_schema(spec: HashMap<String, InferredType>) -> Result<Schema, ArrowError> {
-    Ok(Schema::new(generate_fields(&spec)?))
-}
-
-/// JSON file reader that produces a serde_json::Value iterator from a Read trait
-///
-/// # Example
-///
-/// ```
-/// use std::fs::File;
-/// use std::io::BufReader;
-/// use arrow_json::reader::ValueIter;
-///
-/// let mut reader =
-///     BufReader::new(File::open("test/data/mixed_arrays.json").unwrap());
-/// let mut value_reader = ValueIter::new(&mut reader, None);
-/// for value in value_reader {
-///     println!("JSON value: {}", value.unwrap());
-/// }
-/// ```
-#[derive(Debug)]
-pub struct ValueIter<R: BufRead> {
-    reader: R,
-    max_read_records: Option<usize>,
-    record_count: usize,
-    // reuse line buffer to avoid allocation on each record
-    line_buf: String,
-}
-
-impl<R: BufRead> ValueIter<R> {
-    /// Creates a new `ValueIter`
-    pub fn new(reader: R, max_read_records: Option<usize>) -> Self {
-        Self {
-            reader,
-            max_read_records,
-            record_count: 0,
-            line_buf: String::new(),
-        }
-    }
-}
-
-impl<R: BufRead> Iterator for ValueIter<R> {
-    type Item = Result<Value, ArrowError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(max) = self.max_read_records {
-            if self.record_count >= max {
-                return None;
-            }
-        }
-
-        loop {
-            self.line_buf.truncate(0);
-            match self.reader.read_line(&mut self.line_buf) {
-                Ok(0) => {
-                    // read_line returns 0 when stream reached EOF
-                    return None;
-                }
-                Err(e) => {
-                    return Some(Err(ArrowError::JsonError(format!(
-                        "Failed to read JSON record: {e}"
-                    ))));
-                }
-                _ => {
-                    let trimmed_s = self.line_buf.trim();
-                    if trimmed_s.is_empty() {
-                        // ignore empty lines
-                        continue;
-                    }
-
-                    self.record_count += 1;
-                    return Some(
-                        serde_json::from_str(trimmed_s)
-                            .map_err(|e| ArrowError::JsonError(format!("Not valid JSON: {e}"))),
-                    );
-                }
-            }
-        }
-    }
-}
+type Result<T> = std::result::Result<T, ArrowError>;
 
 /// Infer the fields of a JSON file by reading the first n records of the file, with
 /// `max_read_records` controlling the maximum number of records to read.
@@ -220,7 +43,7 @@ impl<R: BufRead> Iterator for ValueIter<R> {
 /// use std::io::BufReader;
 /// use arrow_json::reader::infer_json_schema_from_seekable;
 ///
-/// let file = File::open("test/data/mixed_arrays.json").unwrap();
+/// let file = File::open("test/data/arrays.json").unwrap();
 /// // file's cursor's offset at 0
 /// let mut reader = BufReader::new(file);
 /// let inferred_schema = infer_json_schema_from_seekable(&mut reader, None).unwrap();
@@ -231,7 +54,7 @@ impl<R: BufRead> Iterator for ValueIter<R> {
 pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
     mut reader: R,
     max_read_records: Option<usize>,
-) -> Result<(Schema, usize), ArrowError> {
+) -> Result<(Schema, usize)> {
     let schema = infer_json_schema(&mut reader, max_read_records);
     // return the reader seek back to the start
     reader.rewind()?;
@@ -266,7 +89,7 @@ pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
 /// use flate2::read::GzDecoder;
 /// use arrow_json::reader::infer_json_schema;
 ///
-/// let mut file = File::open("test/data/mixed_arrays.json.gz").unwrap();
+/// let mut file = File::open("test/data/arrays.json.gz").unwrap();
 ///
 /// // file's cursor's offset at 0
 /// let mut reader = BufReader::new(GzDecoder::new(&file));
@@ -279,217 +102,17 @@ pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
 pub fn infer_json_schema<R: BufRead>(
     reader: R,
     max_read_records: Option<usize>,
-) -> Result<(Schema, usize), ArrowError> {
+) -> Result<(Schema, usize)> {
     let mut values = ValueIter::new(reader, max_read_records);
     let schema = infer_json_schema_from_iterator(&mut values)?;
-    Ok((schema, values.record_count))
-}
-
-fn set_object_scalar_field_type(
-    field_types: &mut HashMap<String, InferredType>,
-    key: &str,
-    ftype: DataType,
-) -> Result<(), ArrowError> {
-    if InferredType::is_none_or_any(field_types.get(key)) {
-        field_types.insert(key.to_string(), InferredType::Scalar(HashSet::new()));
-    }
-
-    match field_types.get_mut(key).unwrap() {
-        InferredType::Scalar(hs) => {
-            hs.insert(ftype);
-            Ok(())
-        }
-        // in case of column contains both scalar type and scalar array type, we convert type of
-        // this column to scalar array.
-        scalar_array @ InferredType::Array(_) => {
-            let mut hs = HashSet::new();
-            hs.insert(ftype);
-            scalar_array.merge(InferredType::Scalar(hs))?;
-            Ok(())
-        }
-        t => Err(ArrowError::JsonError(format!(
-            "Expected scalar or scalar array JSON type, found: {t:?}",
-        ))),
-    }
-}
-
-fn infer_scalar_array_type(array: &[Value]) -> Result<InferredType, ArrowError> {
-    let mut hs = HashSet::new();
-
-    for v in array {
-        match v {
-            Value::Null => {}
-            Value::Number(n) => {
-                if n.is_i64() {
-                    hs.insert(DataType::Int64);
-                } else {
-                    hs.insert(DataType::Float64);
-                }
-            }
-            Value::Bool(_) => {
-                hs.insert(DataType::Boolean);
-            }
-            Value::String(_) => {
-                hs.insert(DataType::Utf8);
-            }
-            Value::Array(_) | Value::Object(_) => {
-                return Err(ArrowError::JsonError(format!(
-                    "Expected scalar value for scalar array, got: {v:?}"
-                )));
-            }
-        }
-    }
-
-    Ok(InferredType::Scalar(hs))
-}
-
-fn infer_nested_array_type(array: &[Value]) -> Result<InferredType, ArrowError> {
-    let mut inner_ele_type = InferredType::Any;
-
-    for v in array {
-        match v {
-            Value::Array(inner_array) => {
-                inner_ele_type.merge(infer_array_element_type(inner_array)?)?;
-            }
-            x => {
-                return Err(ArrowError::JsonError(format!(
-                    "Got non array element in nested array: {x:?}"
-                )));
-            }
-        }
-    }
-
-    Ok(InferredType::Array(Box::new(inner_ele_type)))
-}
-
-fn infer_struct_array_type(array: &[Value]) -> Result<InferredType, ArrowError> {
-    let mut field_types = HashMap::new();
-
-    for v in array {
-        match v {
-            Value::Object(map) => {
-                collect_field_types_from_object(&mut field_types, map)?;
-            }
-            _ => {
-                return Err(ArrowError::JsonError(format!(
-                    "Expected struct value for struct array, got: {v:?}"
-                )));
-            }
-        }
-    }
-
-    Ok(InferredType::Object(field_types))
-}
-
-fn infer_array_element_type(array: &[Value]) -> Result<InferredType, ArrowError> {
-    match array.iter().take(1).next() {
-        None => Ok(InferredType::Any), // empty array, return any type that can be updated later
-        Some(a) => match a {
-            Value::Array(_) => infer_nested_array_type(array),
-            Value::Object(_) => infer_struct_array_type(array),
-            _ => infer_scalar_array_type(array),
-        },
-    }
-}
-
-fn collect_field_types_from_object(
-    field_types: &mut HashMap<String, InferredType>,
-    map: &serde_json::map::Map<String, Value>,
-) -> Result<(), ArrowError> {
-    for (k, v) in map {
-        match v {
-            Value::Array(array) => {
-                let ele_type = infer_array_element_type(array)?;
-
-                if InferredType::is_none_or_any(field_types.get(k)) {
-                    match ele_type {
-                        InferredType::Scalar(_) => {
-                            field_types.insert(
-                                k.to_string(),
-                                InferredType::Array(Box::new(InferredType::Scalar(HashSet::new()))),
-                            );
-                        }
-                        InferredType::Object(_) => {
-                            field_types.insert(
-                                k.to_string(),
-                                InferredType::Array(Box::new(InferredType::Object(HashMap::new()))),
-                            );
-                        }
-                        InferredType::Any | InferredType::Array(_) => {
-                            // set inner type to any for nested array as well
-                            // so it can be updated properly from subsequent type merges
-                            field_types.insert(
-                                k.to_string(),
-                                InferredType::Array(Box::new(InferredType::Any)),
-                            );
-                        }
-                    }
-                }
-
-                match field_types.get_mut(k).unwrap() {
-                    InferredType::Array(inner_type) => {
-                        inner_type.merge(ele_type)?;
-                    }
-                    // in case of column contains both scalar type and scalar array type, we
-                    // convert type of this column to scalar array.
-                    field_type @ InferredType::Scalar(_) => {
-                        field_type.merge(ele_type)?;
-                        *field_type = InferredType::Array(Box::new(field_type.clone()));
-                    }
-                    t => {
-                        return Err(ArrowError::JsonError(format!(
-                            "Expected array json type, found: {t:?}",
-                        )));
-                    }
-                }
-            }
-            Value::Bool(_) => {
-                set_object_scalar_field_type(field_types, k, DataType::Boolean)?;
-            }
-            Value::Null => {
-                // we treat json as nullable by default when inferring, so just
-                // mark existence of a field if it wasn't known before
-                if !field_types.contains_key(k) {
-                    field_types.insert(k.to_string(), InferredType::Any);
-                }
-            }
-            Value::Number(n) => {
-                if n.is_i64() {
-                    set_object_scalar_field_type(field_types, k, DataType::Int64)?;
-                } else {
-                    set_object_scalar_field_type(field_types, k, DataType::Float64)?;
-                }
-            }
-            Value::String(_) => {
-                set_object_scalar_field_type(field_types, k, DataType::Utf8)?;
-            }
-            Value::Object(inner_map) => {
-                if let InferredType::Any = field_types.get(k).unwrap_or(&InferredType::Any) {
-                    field_types.insert(k.to_string(), InferredType::Object(HashMap::new()));
-                }
-                match field_types.get_mut(k).unwrap() {
-                    InferredType::Object(inner_field_types) => {
-                        collect_field_types_from_object(inner_field_types, inner_map)?;
-                    }
-                    t => {
-                        return Err(ArrowError::JsonError(format!(
-                            "Expected object json type, found: {t:?}",
-                        )));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    Ok((schema, values.record_count()))
 }
 
 /// Infer the fields of a JSON file by reading all items from the JSON Value Iterator.
 ///
 /// The following type coercion logic is implemented:
 /// * `Int64` and `Float64` are converted to `Float64`
-/// * Lists and scalars are coerced to a list of a compatible scalar
-/// * All other cases are coerced to `Utf8` (String)
+/// * Incompatible scalars are coerced to `Utf8` (String)
 ///
 /// Note that the above coercion logic is different from what Spark has, where it would default to
 /// String type in case of List and Scalar values appeared in the same field.
@@ -497,27 +120,290 @@ fn collect_field_types_from_object(
 /// The reason we diverge here is because we don't have utilities to deal with JSON data once it's
 /// interpreted as Strings. We should match Spark's behavior once we added more JSON parsing
 /// kernels in the future.
-pub fn infer_json_schema_from_iterator<I, V>(value_iter: I) -> Result<Schema, ArrowError>
+pub fn infer_json_schema_from_iterator<I, V>(value_iter: I) -> Result<Schema>
 where
-    I: Iterator<Item = Result<V, ArrowError>>,
+    I: Iterator<Item = Result<V>>,
     V: Borrow<Value>,
 {
-    let mut field_types: HashMap<String, InferredType> = HashMap::new();
+    let arena = &Bump::new();
 
-    for record in value_iter {
-        match record?.borrow() {
-            Value::Object(map) => {
-                collect_field_types_from_object(&mut field_types, map)?;
-            }
-            value => {
-                return Err(ArrowError::JsonError(format!(
-                    "Expected JSON record to be an object, found {value:?}"
-                )));
-            }
-        };
+    value_iter
+        .into_iter()
+        .map(|record| infer_json_type(record?.borrow(), arena))
+        .try_fold(InferredTy::Object(Default::default()), |a, b| {
+            a.union(b?, arena)
+        })?
+        .into_schema()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InferredTy<'a> {
+    Never,
+    Scalar(ScalarTy),
+    Array(&'a InferredTy<'a>),
+    Object(InferredFields<'a>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScalarTy {
+    Bool,
+    Int64,
+    Float64,
+    String,
+    // NOTE: Null isn't needed because it's absorbed into Never
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+struct InferredFields<'a>(&'a [(&'a str, InferredTy<'a>)]);
+
+impl<'a> InferredTy<'a> {
+    fn make_array(elem: Self, arena: &'a Bump) -> Self {
+        Self::Array(arena.alloc(elem))
     }
 
-    generate_schema(field_types)
+    fn make_object<I>(fields: I, arena: &'a Bump) -> Self
+    where
+        I: IntoIterator<Item = (&'a str, InferredTy<'a>)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let fields = arena.alloc_slice_fill_iter(fields);
+        Self::Object(InferredFields(fields))
+    }
+
+    fn union(self, other: Self, arena: &'a Bump) -> Result<Self> {
+        Ok(match (self, other) {
+            (ty, Self::Never) | (Self::Never, ty) => ty,
+
+            (Self::Scalar(left), Self::Scalar(right)) => Self::Scalar(ScalarTy::union(left, right)),
+
+            (Self::Array(left), Self::Array(right)) => {
+                let elem = left.union(*right, arena)?;
+                Self::make_array(elem, arena)
+            }
+
+            (Self::Object(left), Self::Object(right)) => Self::union_objects(left, right, arena)?,
+
+            _ => Err(ArrowError::JsonError(format!(
+                "Incompatible type found during schema inference: {self:?} vs {other:?}"
+            )))?,
+        })
+    }
+
+    fn union_objects(
+        left: InferredFields<'a>,
+        right: InferredFields<'a>,
+        arena: &'a Bump,
+    ) -> Result<Self> {
+        let mut fields = IndexMap::new();
+
+        for (key, ty) in left {
+            fields.insert(key, ty);
+        }
+
+        for (key, ty) in right {
+            use indexmap::map::Entry;
+            match fields.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    let merged = entry.get().union(ty, arena)?;
+                    entry.insert(merged);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(ty);
+                }
+            }
+        }
+
+        Ok(Self::make_object(fields, arena))
+    }
+
+    fn into_datatype(self) -> DataType {
+        match self {
+            Self::Never => DataType::Null,
+            Self::Scalar(s) => s.into_datatype(),
+            Self::Array(elem) => DataType::List(elem.into_list_field().into()),
+            Self::Object(fields) => DataType::Struct(fields.into_fields()),
+        }
+    }
+
+    fn into_field(self, name: impl Into<String>) -> Field {
+        Field::new(name, self.into_datatype(), true)
+    }
+
+    fn into_list_field(self) -> Field {
+        Field::new_list_field(self.into_datatype(), true)
+    }
+
+    fn into_schema(self) -> Result<Schema> {
+        let Self::Object(fields) = self else {
+            Err(ArrowError::JsonError(format!(
+                "Expected JSON object, found: {self:?}",
+            )))?
+        };
+
+        Ok(Schema::new(fields.into_fields()))
+    }
+}
+
+impl ScalarTy {
+    fn union(left: Self, right: Self) -> Self {
+        match (left, right) {
+            _ if left == right => left,
+            (Self::Int64, Self::Float64) => Self::Float64,
+            (Self::Float64, Self::Int64) => Self::Float64,
+            _ => Self::String,
+        }
+    }
+
+    fn into_datatype(self) -> DataType {
+        match self {
+            Self::Bool => DataType::Boolean,
+            Self::Int64 => DataType::Int64,
+            Self::Float64 => DataType::Float64,
+            Self::String => DataType::Utf8,
+        }
+    }
+}
+
+impl<'a> InferredFields<'a> {
+    fn into_fields(self) -> Fields {
+        self.0
+            .into_iter()
+            .map(|(key, ty)| ty.into_field(*key))
+            .collect()
+    }
+}
+
+impl<'a> IntoIterator for InferredFields<'a> {
+    type Item = (&'a str, InferredTy<'a>);
+    type IntoIter = std::iter::Copied<std::slice::Iter<'a, (&'a str, InferredTy<'a>)>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().copied()
+    }
+}
+
+fn infer_json_type<'a>(value: &Value, arena: &'a Bump) -> Result<InferredTy<'a>> {
+    Ok(match value {
+        Value::Null => InferredTy::Never,
+        Value::Bool(_) => InferredTy::Scalar(ScalarTy::Bool),
+        Value::Number(n) => {
+            if n.is_i64() {
+                InferredTy::Scalar(ScalarTy::Int64)
+            } else {
+                InferredTy::Scalar(ScalarTy::Float64)
+            }
+        }
+        Value::String(_) => InferredTy::Scalar(ScalarTy::String),
+        Value::Array(elements) => {
+            let elem_ty = elements
+                .iter()
+                .map(|value| infer_json_type(value, arena))
+                .try_fold(InferredTy::Never, |a, b| a.union(b?, arena))?;
+            InferredTy::make_array(elem_ty, arena)
+        }
+        Value::Object(fields) => {
+            let fields = fields
+                .iter()
+                .map(|(key, value)| {
+                    let key: &str = arena.alloc_str(key);
+                    let value = infer_json_type(value, arena)?;
+                    Ok((key, value))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            InferredTy::make_object(fields, arena)
+        }
+    })
+}
+
+mod value_iter {
+    use std::io::BufRead;
+
+    use arrow_schema::ArrowError;
+    use serde_json::Value;
+
+    /// JSON file reader that produces a serde_json::Value iterator from a Read trait
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::fs::File;
+    /// use std::io::BufReader;
+    /// use arrow_json::reader::ValueIter;
+    ///
+    /// let mut reader =
+    ///     BufReader::new(File::open("test/data/arrays.json").unwrap());
+    /// let mut value_reader = ValueIter::new(&mut reader, None);
+    /// for value in value_reader {
+    ///     println!("JSON value: {}", value.unwrap());
+    /// }
+    /// ```
+    #[derive(Debug)]
+    pub struct ValueIter<R: BufRead> {
+        reader: R,
+        max_read_records: Option<usize>,
+        record_count: usize,
+        // reuse line buffer to avoid allocation on each record
+        line_buf: String,
+    }
+
+    impl<R: BufRead> ValueIter<R> {
+        /// Returns the number of records this iterator has consumed
+        pub fn record_count(&self) -> usize {
+            self.record_count
+        }
+    }
+
+    impl<R: BufRead> ValueIter<R> {
+        /// Creates a new `ValueIter`
+        pub fn new(reader: R, max_read_records: Option<usize>) -> Self {
+            Self {
+                reader,
+                max_read_records,
+                record_count: 0,
+                line_buf: String::new(),
+            }
+        }
+    }
+
+    impl<R: BufRead> Iterator for ValueIter<R> {
+        type Item = Result<Value, ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(max) = self.max_read_records {
+                if self.record_count >= max {
+                    return None;
+                }
+            }
+
+            loop {
+                self.line_buf.truncate(0);
+                match self.reader.read_line(&mut self.line_buf) {
+                    Ok(0) => {
+                        // read_line returns 0 when stream reached EOF
+                        return None;
+                    }
+                    Err(e) => {
+                        return Some(Err(ArrowError::JsonError(format!(
+                            "Failed to read JSON record: {e}"
+                        ))));
+                    }
+                    _ => {
+                        let trimmed_s = self.line_buf.trim();
+                        if trimmed_s.is_empty() {
+                            // ignore empty lines
+                            continue;
+                        }
+
+                        self.record_count += 1;
+                        return Some(
+                            serde_json::from_str(trimmed_s)
+                                .map_err(|e| ArrowError::JsonError(format!("Not valid JSON: {e}"))),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -526,6 +412,7 @@ mod tests {
     use flate2::read::GzDecoder;
     use std::fs::File;
     use std::io::{BufReader, Cursor};
+    use std::sync::Arc;
 
     #[test]
     fn test_json_infer_schema() {
@@ -533,21 +420,21 @@ mod tests {
             Field::new("a", DataType::Int64, true),
             Field::new("b", list_type_of(DataType::Float64), true),
             Field::new("c", list_type_of(DataType::Boolean), true),
-            Field::new("d", list_type_of(DataType::Utf8), true),
+            Field::new("d", DataType::Utf8, true),
         ]);
 
-        let mut reader = BufReader::new(File::open("test/data/mixed_arrays.json").unwrap());
+        let mut reader = BufReader::new(File::open("test/data/arrays.json").unwrap());
         let (inferred_schema, n_rows) = infer_json_schema_from_seekable(&mut reader, None).unwrap();
 
         assert_eq!(inferred_schema, schema);
-        assert_eq!(n_rows, 4);
+        assert_eq!(n_rows, 3);
 
-        let file = File::open("test/data/mixed_arrays.json.gz").unwrap();
+        let file = File::open("test/data/arrays.json.gz").unwrap();
         let mut reader = BufReader::new(GzDecoder::new(&file));
         let (inferred_schema, n_rows) = infer_json_schema(&mut reader, None).unwrap();
 
         assert_eq!(inferred_schema, schema);
-        assert_eq!(n_rows, 4);
+        assert_eq!(n_rows, 3);
     }
 
     #[test]
@@ -677,27 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn test_coercion_scalar_and_list() {
-        assert_eq!(
-            list_type_of(DataType::Float64),
-            coerce_data_type(vec![&DataType::Float64, &list_type_of(DataType::Float64)])
-        );
-        assert_eq!(
-            list_type_of(DataType::Float64),
-            coerce_data_type(vec![&DataType::Float64, &list_type_of(DataType::Int64)])
-        );
-        assert_eq!(
-            list_type_of(DataType::Int64),
-            coerce_data_type(vec![&DataType::Int64, &list_type_of(DataType::Int64)])
-        );
-        // boolean and number are incompatible, return utf8
-        assert_eq!(
-            list_type_of(DataType::Utf8),
-            coerce_data_type(vec![&DataType::Boolean, &list_type_of(DataType::Float64)])
-        );
-    }
-
-    #[test]
     fn test_invalid_json_infer_schema() {
         let re = infer_json_schema_from_seekable(Cursor::new(b"}"), None);
         assert_eq!(
@@ -746,5 +612,10 @@ mod tests {
             true,
         )]);
         assert_eq!(inferred_schema, schema);
+    }
+
+    /// Shorthand for building list data type of `ty`
+    fn list_type_of(ty: DataType) -> DataType {
+        DataType::List(Arc::new(Field::new_list_field(ty, true)))
     }
 }
