@@ -136,6 +136,27 @@ where
         .into_schema()
 }
 
+/// Infer the schema of a JSON file by reading all items from the JSON Value Iterator.
+///
+/// This differs from `infer_json_schema_from_iterator` in that it returns the inferred
+/// schema as a `DataType` rather than a `Schema`, permitting the top-level items to be
+/// values other than objects (such as arrays, or even scalar values).
+pub fn infer_single_field_json_schema_from_iterator<I, V>(value_iter: I) -> Result<DataType>
+where
+    I: Iterator<Item = Result<V>>,
+    V: Borrow<Value>,
+{
+    let arena = &Bump::new();
+
+    let datatype = value_iter
+        .into_iter()
+        .map(|record| infer_json_type(record?.borrow(), arena))
+        .try_fold(InferredTy::Never, |a, b| a.union(b?, arena))?
+        .into_datatype();
+
+    Ok(datatype)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum InferredTy<'a> {
     Never,
