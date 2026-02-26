@@ -287,10 +287,7 @@ impl ScalarTy {
 
 impl<'a> InferredFields<'a> {
     fn into_fields(self) -> Fields {
-        self.0
-            .into_iter()
-            .map(|(key, ty)| ty.into_field(*key))
-            .collect()
+        self.0.iter().map(|(key, ty)| ty.into_field(*key)).collect()
     }
 }
 
