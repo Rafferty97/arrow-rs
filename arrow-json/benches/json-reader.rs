@@ -16,7 +16,7 @@
 // under the License.
 
 use arrow_json::ReaderBuilder;
-use arrow_json::reader::Decoder;
+use arrow_json::reader::{Decoder, ValueIter};
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
@@ -198,6 +198,27 @@ fn bench_decode_schema(c: &mut Criterion, name: &str, data: &[u8], schema: Arc<S
     group.finish();
 }
 
+fn bench_value_iter(c: &mut Criterion) {
+    let data = build_wide_json(BATCH_SIZE, 32);
+
+    let mut group = c.benchmark_group("value_iter");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    group.sample_size(50);
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.warm_up_time(std::time::Duration::from_secs(2));
+    group.sampling_mode(SamplingMode::Flat);
+    group.bench_function(BenchmarkId::from_parameter(ROWS), |b| {
+        b.iter(|| {
+            let mut iter = ValueIter::new(&data[..], None);
+            for row in &mut iter {
+                black_box(row.unwrap());
+            }
+            black_box(iter.record_count());
+        })
+    });
+    group.finish();
+}
+
 fn build_wide_projection_json(rows: usize, total_fields: usize) -> Vec<u8> {
     // Estimate: each field ~15 bytes ("fXX":VVVVVVV,), total ~15*100 + overhead
     let per_row_size = total_fields * 15 + 10;
@@ -210,6 +231,8 @@ fn build_wide_projection_json(rows: usize, total_fields: usize) -> Vec<u8> {
                 data.push(',');
             }
             // Use fixed-width values for stable benchmarks: 7 digits
+            // Note: This produces integers with leading zeroes, which doesn't
+            // strictly conform to the JSON spec
             let _ = write!(data, "\"f{}\":{:07}", i, i);
         }
         data.push('}');
@@ -245,6 +268,7 @@ criterion_group!(
     bench_decode_wide_object,
     bench_serialize_wide_object,
     bench_binary_hex,
-    bench_wide_projection
+    bench_wide_projection,
+    bench_value_iter
 );
 criterion_main!(benches);
