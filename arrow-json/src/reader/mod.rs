@@ -149,6 +149,7 @@ use arrow_array::types::*;
 use arrow_array::{RecordBatch, RecordBatchReader, StructArray, downcast_integer, make_array};
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
+pub use iter_reader::ValueIter;
 pub use schema::*;
 
 use crate::reader::boolean_array::BooleanArrayDecoder;
@@ -167,6 +168,7 @@ use crate::reader::timestamp_array::TimestampArrayDecoder;
 mod binary_array;
 mod boolean_array;
 mod decimal_array;
+mod iter_reader;
 mod list_array;
 mod map_array;
 mod null_array;
