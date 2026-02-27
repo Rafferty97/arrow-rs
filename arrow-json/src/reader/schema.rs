@@ -626,7 +626,7 @@ mod tests {
         let re = infer_json_schema_from_seekable(Cursor::new(b"}"), None);
         assert_eq!(
             re.err().unwrap().to_string(),
-            "Json error: Not valid JSON: expected value at line 1 column 1",
+            "Json error: Encountered unexpected '}' whilst parsing value",
         );
     }
 

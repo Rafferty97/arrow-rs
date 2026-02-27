@@ -295,6 +295,7 @@ macro_rules! next {
 }
 
 /// Implements a state machine for decoding JSON to a tape
+#[derive(Debug)]
 pub struct TapeDecoder {
     elements: Vec<TapeElement>,
 
@@ -338,6 +339,14 @@ impl TapeDecoder {
         }
     }
 
+    /// Read JSON objects from `buf`, returning the number of bytes read.
+    ///
+    /// This method returns once `batch_size` objects have been parsed and
+    /// buffered to the current tape, or `buf` is exhausted. Any remaining bytes
+    /// should be included in the next call to [`Self::decode`].
+    ///
+    /// There is no requirement that `buf` contains a whole number of records, facilitating
+    /// integration with arbitrary byte streams, such as those yielded by [`BufRead`].
     pub fn decode(&mut self, buf: &[u8]) -> Result<usize, ArrowError> {
         let mut iter = BufIter::new(buf);
 
