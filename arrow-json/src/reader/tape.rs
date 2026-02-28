@@ -111,6 +111,14 @@ impl<'a> Tape<'a> {
         unsafe { self.strings.get_unchecked(start_offset..end_offset) }
     }
 
+    /// Gets the number of elements in the tape
+    pub fn len(&self) -> u32 {
+        self.elements
+            .len()
+            .try_into()
+            .expect("too many tape elements")
+    }
+
     /// Returns the tape element at `idx`
     pub fn get(&self, idx: u32) -> TapeElement {
         self.elements[idx as usize]
@@ -338,6 +346,14 @@ impl TapeDecoder {
         }
     }
 
+    /// Read JSON objects from `buf`, returning the number of bytes read
+    ///
+    /// This method returns once `batch_size` objects have been buffered since the
+    /// last call to [`Self::finish`], or `buf` is exhausted. Any remaining bytes
+    /// should be included in the next call to [`Self::decode`]
+    ///
+    /// There is no requirement that `buf` contains a whole number of records, facilitating
+    /// integration with arbitrary byte streams, such as those yielded by [`BufRead`]
     pub fn decode(&mut self, buf: &[u8]) -> Result<usize, ArrowError> {
         let mut iter = BufIter::new(buf);
 

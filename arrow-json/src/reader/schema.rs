@@ -16,14 +16,16 @@
 // under the License.
 
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::io::{BufRead, Seek};
+use std::usize;
 
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
 use bumpalo::Bump;
 use indexmap::IndexMap;
 use serde_json::Value;
 
-pub use super::ValueIter;
+use super::tape::{Tape, TapeDecoder, TapeElement};
 
 type Result<T> = std::result::Result<T, ArrowError>;
 
@@ -100,12 +102,27 @@ pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
 /// file.seek(SeekFrom::Start(0)).unwrap();
 /// ```
 pub fn infer_json_schema<R: BufRead>(
-    reader: R,
+    mut reader: R,
     max_read_records: Option<usize>,
 ) -> Result<(Schema, usize)> {
-    let mut values = ValueIter::new(reader, max_read_records);
-    let schema = infer_json_schema_from_iterator(&mut values)?;
-    Ok((schema, values.record_count()))
+    let arena = Bump::new();
+    let mut decoder = SchemaDecoder::new(max_read_records, &arena);
+
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        let read = buf.len();
+
+        let decoded = decoder.decode(buf)?;
+        reader.consume(read);
+        if decoded != read {
+            break;
+        }
+    }
+
+    decoder.finish()
 }
 
 /// Infer the fields of a JSON file by reading all items from the JSON Value Iterator.
@@ -130,9 +147,7 @@ where
     value_iter
         .into_iter()
         .map(|record| infer_json_type(record?.borrow(), arena))
-        .try_fold(InferredTy::Object(Default::default()), |a, b| {
-            a.union(b?, arena)
-        })?
+        .try_fold(*EMPTY_OBJECT_TY, |a, b| a.union(b?, arena))?
         .into_schema()
 }
 
@@ -151,10 +166,203 @@ where
     let datatype = value_iter
         .into_iter()
         .map(|record| infer_json_type(record?.borrow(), arena))
-        .try_fold(InferredTy::Never, |a, b| a.union(b?, arena))?
+        .try_fold(*NEVER_TY, |a, b| a.union(b?, arena))?
         .into_datatype();
 
     Ok(datatype)
+}
+
+struct SchemaDecoder<'a> {
+    decoder: TapeDecoder,
+    max_read_records: Option<usize>,
+    record_count: usize,
+    schema: &'a InferredTy<'a>,
+    arena: &'a Bump,
+}
+
+impl<'a> SchemaDecoder<'a> {
+    pub fn new(max_read_records: Option<usize>, arena: &'a Bump) -> Self {
+        Self {
+            decoder: TapeDecoder::new(1024, 8),
+            max_read_records,
+            record_count: 0,
+            schema: NEVER_TY,
+            arena,
+        }
+    }
+
+    pub fn decode(&mut self, buf: &[u8]) -> Result<usize> {
+        let read = self.decoder.decode(buf)?;
+        if read != buf.len() {
+            self.infer_batch()?;
+        }
+        Ok(read)
+    }
+
+    pub fn finish(mut self) -> Result<(Schema, usize)> {
+        self.infer_batch()?;
+        Ok((self.schema.into_schema()?, self.record_count))
+    }
+
+    fn infer_batch(&mut self) -> Result<()> {
+        let tape = self.decoder.finish()?;
+
+        let remaining_records = self
+            .max_read_records
+            .map_or(usize::MAX, |max| max - self.record_count);
+
+        for idx in iter_elements(&tape, 0, tape.len()).take(remaining_records) {
+            self.schema = infer_type(&tape, idx, self.schema, self.arena)?;
+            self.record_count += 1;
+        }
+
+        self.decoder.clear();
+        Ok(())
+    }
+}
+
+fn infer_type<'a>(
+    tape: &Tape,
+    idx: u32,
+    expect: &'a InferredTy<'a>,
+    arena: &'a Bump,
+) -> Result<&'a InferredTy<'a>> {
+    let make_err = |got| {
+        let expected = match expect {
+            InferredTy::Never => unreachable!(),
+            InferredTy::Scalar(_) => "a scalar value",
+            InferredTy::Array(_) => "an array",
+            InferredTy::Object(_) => "an object",
+        };
+        let msg = format!("incompatible types: expected {expected}, but got {got}");
+        ArrowError::JsonError(msg)
+    };
+
+    let infer_scalar = |scalar: ScalarTy, got: &'static str| {
+        Ok(match expect {
+            InferredTy::Never => match scalar {
+                ScalarTy::Bool => BOOL_TY,
+                ScalarTy::Int64 => INT64_TY,
+                ScalarTy::Float64 => FLOAT64_TY,
+                ScalarTy::String => STRING_TY,
+            },
+            InferredTy::Scalar(expect) => match (expect, &scalar) {
+                (ScalarTy::Bool, ScalarTy::Bool) => BOOL_TY,
+                (ScalarTy::Int64, ScalarTy::Int64) => INT64_TY,
+                // Mixed numbers coerce to f64
+                (ScalarTy::Int64 | ScalarTy::Float64, ScalarTy::Int64 | ScalarTy::Float64) => {
+                    FLOAT64_TY
+                }
+                // Any other combination coerces to string
+                _ => STRING_TY,
+            },
+            _ => Err(make_err(got))?,
+        })
+    };
+
+    match tape.get(idx) {
+        TapeElement::Null => Ok(expect),
+        TapeElement::False => infer_scalar(ScalarTy::Bool, "a boolean"),
+        TapeElement::True => infer_scalar(ScalarTy::Bool, "a boolean"),
+        TapeElement::I64(_) | TapeElement::I32(_) => infer_scalar(ScalarTy::Int64, "a number"),
+        TapeElement::F64(_) | TapeElement::F32(_) => infer_scalar(ScalarTy::Float64, "a number"),
+        TapeElement::Number(s) => {
+            if tape.get_string(s).parse::<i64>().is_ok() {
+                infer_scalar(ScalarTy::Int64, "a number")
+            } else {
+                infer_scalar(ScalarTy::Float64, "a number")
+            }
+        }
+        TapeElement::String(_) => infer_scalar(ScalarTy::String, "a string"),
+        TapeElement::StartList(end) => {
+            let (expect, expect_elem) = match *expect {
+                InferredTy::Never => (ARRAY_OF_NEVER_TY, NEVER_TY),
+                InferredTy::Array(inner) => (expect, inner),
+                _ => Err(make_err("an array"))?,
+            };
+
+            let elem = iter_elements(tape, idx, end).try_fold(expect_elem, |expect, idx| {
+                infer_type(tape, idx, expect, arena)
+            })?;
+
+            Ok(if std::ptr::eq(elem, expect_elem) {
+                expect
+            } else {
+                arena.alloc(InferredTy::Array(elem))
+            })
+        }
+        TapeElement::EndList(_) => unreachable!(),
+        TapeElement::StartObject(end) => {
+            let (expect, expect_fields) = match *expect {
+                InferredTy::Never => (EMPTY_OBJECT_TY, &[] as &[_]),
+                InferredTy::Object(fields) => (expect, fields),
+                _ => Err(make_err("an object"))?,
+            };
+
+            let mut num_fields = expect_fields.len();
+            let mut substs = HashMap::<usize, (&'a str, &'a InferredTy<'a>)>::new();
+
+            for (key, idx) in iter_fields(tape, idx, end) {
+                let existing_field = expect_fields
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, (existing_key, _))| *existing_key == key);
+
+                match existing_field {
+                    Some((field_idx, (key, expect_ty))) => {
+                        let ty = infer_type(tape, idx, expect_ty, arena)?;
+                        if !std::ptr::eq(ty, expect_ty) {
+                            substs.insert(field_idx, (key, ty));
+                        }
+                    }
+                    None => {
+                        let field_idx = num_fields;
+                        num_fields += 1;
+                        let key = arena.alloc_str(key);
+                        let ty = infer_type(tape, idx, NEVER_TY, arena)?;
+                        substs.insert(field_idx, (key, ty));
+                    }
+                };
+            }
+
+            Ok(if substs.is_empty() {
+                expect
+            } else {
+                let fields =
+                    arena.alloc_slice_fill_with(num_fields, |idx| match substs.get(&idx) {
+                        Some(subst) => *subst,
+                        None => expect_fields[idx],
+                    });
+                arena.alloc(InferredTy::Object(fields))
+            })
+        }
+        TapeElement::EndObject(_) => unreachable!(),
+    }
+}
+
+fn iter_elements(tape: &Tape, start: u32, end: u32) -> impl Iterator<Item = u32> {
+    let mut idx = start + 1;
+    std::iter::from_fn(move || {
+        (idx < end).then(|| {
+            let elem_idx = idx;
+            idx = tape.next(idx, "??").unwrap();
+            elem_idx
+        })
+    })
+}
+
+fn iter_fields<'a>(tape: &'a Tape, start: u32, end: u32) -> impl Iterator<Item = (&'a str, u32)> {
+    let mut iter = iter_elements(tape, start, end);
+    std::iter::from_fn(move || {
+        let key_idx = iter.next()?;
+        let key = match tape.get(key_idx) {
+            TapeElement::String(s) => tape.get_string(s),
+            _ => unreachable!(),
+        };
+        let field_idx = iter.next().unwrap();
+        Some((key, field_idx))
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,8 +382,15 @@ enum ScalarTy {
     // NOTE: Null isn't needed because it's absorbed into Never
 }
 
-#[derive(Clone, Copy, Default, Debug)]
-struct InferredFields<'a>(&'a [(&'a str, InferredTy<'a>)]);
+static NEVER_TY: &InferredTy<'static> = &InferredTy::Never;
+static BOOL_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Bool);
+static INT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Int64);
+static FLOAT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Float64);
+static STRING_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::String);
+static ARRAY_OF_NEVER_TY: &InferredTy<'static> = &InferredTy::Array(NEVER_TY);
+static EMPTY_OBJECT_TY: &InferredTy<'static> = &InferredTy::Object(&[]);
+
+type InferredFields<'a> = &'a [(&'a str, &'a InferredTy<'a>)];
 
 impl<'a> InferredTy<'a> {
     fn make_array(elem: Self, arena: &'a Bump) -> Self {
@@ -184,11 +399,11 @@ impl<'a> InferredTy<'a> {
 
     fn make_object<I>(fields: I, arena: &'a Bump) -> Self
     where
-        I: IntoIterator<Item = (&'a str, InferredTy<'a>)>,
+        I: IntoIterator<Item = (&'a str, &'a InferredTy<'a>)>,
         I::IntoIter: ExactSizeIterator,
     {
         let fields = arena.alloc_slice_fill_iter(fields);
-        Self::Object(InferredFields(fields))
+        Self::Object(fields)
     }
 
     fn union(self, other: Self, arena: &'a Bump) -> Result<Self> {
@@ -217,15 +432,15 @@ impl<'a> InferredTy<'a> {
     ) -> Result<Self> {
         let mut fields = IndexMap::new();
 
-        for (key, ty) in left {
+        for (key, ty) in left.iter().copied() {
             fields.insert(key, ty);
         }
 
-        for (key, ty) in right {
+        for (key, ty) in right.iter().copied() {
             use indexmap::map::Entry;
             match fields.entry(key) {
                 Entry::Occupied(mut entry) => {
-                    let merged = entry.get().union(ty, arena)?;
+                    let merged = &*arena.alloc(entry.get().union(*ty, arena)?);
                     entry.insert(merged);
                 }
                 Entry::Vacant(entry) => {
@@ -242,7 +457,9 @@ impl<'a> InferredTy<'a> {
             Self::Never => DataType::Null,
             Self::Scalar(s) => s.into_datatype(),
             Self::Array(elem) => DataType::List(elem.into_list_field().into()),
-            Self::Object(fields) => DataType::Struct(fields.into_fields()),
+            Self::Object(fields) => {
+                DataType::Struct(fields.iter().map(|(key, ty)| ty.into_field(*key)).collect())
+            }
         }
     }
 
@@ -261,7 +478,12 @@ impl<'a> InferredTy<'a> {
             )))?
         };
 
-        Ok(Schema::new(fields.into_fields()))
+        let fields = fields
+            .iter()
+            .map(|(key, ty)| ty.into_field(*key))
+            .collect::<Fields>();
+
+        Ok(Schema::new(fields))
     }
 }
 
@@ -282,21 +504,6 @@ impl ScalarTy {
             Self::Float64 => DataType::Float64,
             Self::String => DataType::Utf8,
         }
-    }
-}
-
-impl<'a> InferredFields<'a> {
-    fn into_fields(self) -> Fields {
-        self.0.iter().map(|(key, ty)| ty.into_field(*key)).collect()
-    }
-}
-
-impl<'a> IntoIterator for InferredFields<'a> {
-    type Item = (&'a str, InferredTy<'a>);
-    type IntoIter = std::iter::Copied<std::slice::Iter<'a, (&'a str, InferredTy<'a>)>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().copied()
     }
 }
 
@@ -323,8 +530,8 @@ fn infer_json_type<'a>(value: &Value, arena: &'a Bump) -> Result<InferredTy<'a>>
             let fields = fields
                 .iter()
                 .map(|(key, value)| {
-                    let key: &str = arena.alloc_str(key);
-                    let value = infer_json_type(value, arena)?;
+                    let key = &*arena.alloc_str(key);
+                    let value = &*arena.alloc(infer_json_type(value, arena)?);
                     Ok((key, value))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -495,7 +702,7 @@ mod tests {
         let re = infer_json_schema_from_seekable(Cursor::new(b"}"), None);
         assert_eq!(
             re.err().unwrap().to_string(),
-            "Json error: Not valid JSON: expected value at line 1 column 1",
+            "Json error: Encountered unexpected '}' whilst parsing value",
         );
     }
 
@@ -509,14 +716,14 @@ mod tests {
         let (inferred_schema, _) =
             infer_json_schema_from_seekable(Cursor::new(data), None).expect("infer");
         let schema = Schema::new(vec![
-            Field::new("an", list_type_of(DataType::Null), true),
             Field::new("in", DataType::Int64, true),
-            Field::new("n", DataType::Null, true),
-            Field::new("na", list_type_of(DataType::Null), true),
-            Field::new("nas", list_type_of(DataType::Utf8), true),
             Field::new("ni", DataType::Int64, true),
             Field::new("ns", DataType::Utf8, true),
             Field::new("sn", DataType::Utf8, true),
+            Field::new("n", DataType::Null, true),
+            Field::new("an", list_type_of(DataType::Null), true),
+            Field::new("na", list_type_of(DataType::Null), true),
+            Field::new("nas", list_type_of(DataType::Utf8), true),
         ]);
         assert_eq!(inferred_schema, schema);
     }
