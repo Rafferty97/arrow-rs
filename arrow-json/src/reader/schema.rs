@@ -221,6 +221,33 @@ impl<'a> SchemaDecoder<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum InferredTy<'a> {
+    Never,
+    Scalar(ScalarTy),
+    Array(&'a InferredTy<'a>),
+    Object(InferredFields<'a>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScalarTy {
+    Bool,
+    Int64,
+    Float64,
+    String,
+    // NOTE: Null isn't needed because it's absorbed into Never
+}
+
+type InferredFields<'a> = &'a [(&'a str, &'a InferredTy<'a>)];
+
+static NEVER_TY: &InferredTy<'static> = &InferredTy::Never;
+static BOOL_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Bool);
+static INT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Int64);
+static FLOAT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Float64);
+static STRING_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::String);
+static ARRAY_OF_NEVER_TY: &InferredTy<'static> = &InferredTy::Array(NEVER_TY);
+static EMPTY_OBJECT_TY: &InferredTy<'static> = &InferredTy::Object(&[]);
+
 fn infer_type<'a>(
     tape: &Tape,
     idx: u32,
@@ -234,7 +261,7 @@ fn infer_type<'a>(
             InferredTy::Array(_) => "an array",
             InferredTy::Object(_) => "an object",
         };
-        let msg = format!("incompatible types: expected {expected}, but got {got}");
+        let msg = format!("Expected {expected}, found {got}");
         ArrowError::JsonError(msg)
     };
 
@@ -365,33 +392,6 @@ fn iter_fields<'a>(tape: &'a Tape, start: u32, end: u32) -> impl Iterator<Item =
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-enum InferredTy<'a> {
-    Never,
-    Scalar(ScalarTy),
-    Array(&'a InferredTy<'a>),
-    Object(InferredFields<'a>),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ScalarTy {
-    Bool,
-    Int64,
-    Float64,
-    String,
-    // NOTE: Null isn't needed because it's absorbed into Never
-}
-
-static NEVER_TY: &InferredTy<'static> = &InferredTy::Never;
-static BOOL_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Bool);
-static INT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Int64);
-static FLOAT64_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::Float64);
-static STRING_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::String);
-static ARRAY_OF_NEVER_TY: &InferredTy<'static> = &InferredTy::Array(NEVER_TY);
-static EMPTY_OBJECT_TY: &InferredTy<'static> = &InferredTy::Object(&[]);
-
-type InferredFields<'a> = &'a [(&'a str, &'a InferredTy<'a>)];
-
 impl<'a> InferredTy<'a> {
     fn make_array(elem: Self, arena: &'a Bump) -> Self {
         Self::Array(arena.alloc(elem))
@@ -474,7 +474,7 @@ impl<'a> InferredTy<'a> {
     fn into_schema(self) -> Result<Schema> {
         let Self::Object(fields) = self else {
             Err(ArrowError::JsonError(format!(
-                "Expected JSON object, found: {self:?}",
+                "Expected JSON object, found {self:?}",
             )))?
         };
 
