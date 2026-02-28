@@ -377,20 +377,16 @@ fn infer_json_type<'a, 't>(
         JsonType::Float64 => infer_scalar(ScalarTy::Float64, "a number"),
         JsonType::String => infer_scalar(ScalarTy::String, "a string"),
         JsonType::Array => {
-            println!("zzz: {expected:?} ...");
             let (expected, expected_elem) = match *expected {
                 InferredTy::Never => (ARRAY_OF_NEVER_TY, NEVER_TY),
                 InferredTy::Array(inner) => (expected, inner),
                 _ => Err(make_err("an array"))?,
             };
-            println!("zzz: {expected:?} {expected_elem:?}");
-            println!("has {:?}", value.elements().collect::<Vec<_>>());
 
             let elem = value
                 .elements()
                 .try_fold(expected_elem, |expected, value| {
                     let result = infer_json_type(value, expected, arena);
-                    println!("infer array: {expected:?} + {value:?} = {result:?}");
                     result
                 })?;
 
