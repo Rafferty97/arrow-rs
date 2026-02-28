@@ -104,24 +104,28 @@ pub fn infer_json_schema<R: BufRead>(
     mut reader: R,
     max_read_records: Option<usize>,
 ) -> Result<(Schema, usize)> {
-    let arena = Bump::new();
-    let mut decoder = SchemaDecoder::new(max_read_records, &arena);
+    let mut values = super::ValueIter::new(reader, max_read_records);
+    let schema = infer_json_schema_from_iterator(&mut values)?;
+    Ok((schema, values.record_count()))
 
-    loop {
-        let buf = reader.fill_buf()?;
-        if buf.is_empty() {
-            break;
-        }
-        let read = buf.len();
+    // let arena = Bump::new();
+    // let mut decoder = SchemaDecoder::new(max_read_records, &arena);
 
-        let decoded = decoder.decode(buf)?;
-        reader.consume(read);
-        if decoded != read {
-            break;
-        }
-    }
+    // loop {
+    //     let buf = reader.fill_buf()?;
+    //     if buf.is_empty() {
+    //         break;
+    //     }
+    //     let read = buf.len();
 
-    decoder.finish()
+    //     let decoded = decoder.decode(buf)?;
+    //     reader.consume(read);
+    //     if decoded != read {
+    //         break;
+    //     }
+    // }
+
+    // decoder.finish()
 }
 
 /// Infer the fields of a JSON file by reading all items from the JSON Value Iterator.
