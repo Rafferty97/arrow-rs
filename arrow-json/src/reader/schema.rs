@@ -17,13 +17,12 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::io::{BufRead, Seek};
 use std::usize;
 
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
 use bumpalo::Bump;
-use indexmap::IndexMap;
-use serde_json::Value;
 
 use super::tape::{Tape, TapeDecoder, TapeElement};
 
@@ -140,36 +139,16 @@ pub fn infer_json_schema<R: BufRead>(
 pub fn infer_json_schema_from_iterator<I, V>(value_iter: I) -> Result<Schema>
 where
     I: Iterator<Item = Result<V>>,
-    V: Borrow<Value>,
+    V: Borrow<serde_json::Value>,
 {
     let arena = &Bump::new();
 
     value_iter
         .into_iter()
-        .map(|record| infer_json_type(record?.borrow(), arena))
-        .try_fold(*EMPTY_OBJECT_TY, |a, b| a.union(b?, arena))?
+        .try_fold(EMPTY_OBJECT_TY, |ty, record| {
+            infer_json_type(record?.borrow(), ty, arena)
+        })?
         .into_schema()
-}
-
-/// Infer the schema of a JSON file by reading all items from the JSON Value Iterator.
-///
-/// This differs from `infer_json_schema_from_iterator` in that it returns the inferred
-/// schema as a `DataType` rather than a `Schema`, permitting the top-level items to be
-/// values other than objects (such as arrays, or even scalar values).
-pub fn infer_single_field_json_schema_from_iterator<I, V>(value_iter: I) -> Result<DataType>
-where
-    I: Iterator<Item = Result<V>>,
-    V: Borrow<Value>,
-{
-    let arena = &Bump::new();
-
-    let datatype = value_iter
-        .into_iter()
-        .map(|record| infer_json_type(record?.borrow(), arena))
-        .try_fold(*NEVER_TY, |a, b| a.union(b?, arena))?
-        .into_datatype();
-
-    Ok(datatype)
 }
 
 struct SchemaDecoder<'a> {
@@ -211,8 +190,8 @@ impl<'a> SchemaDecoder<'a> {
             .max_read_records
             .map_or(usize::MAX, |max| max - self.record_count);
 
-        for idx in iter_elements(&tape, 0, tape.len()).take(remaining_records) {
-            self.schema = infer_type(&tape, idx, self.schema, self.arena)?;
+        for value in iter_rows(&tape).take(remaining_records) {
+            self.schema = infer_json_type(value, self.schema, self.arena)?;
             self.record_count += 1;
         }
 
@@ -248,14 +227,118 @@ static STRING_TY: &InferredTy<'static> = &InferredTy::Scalar(ScalarTy::String);
 static ARRAY_OF_NEVER_TY: &InferredTy<'static> = &InferredTy::Array(NEVER_TY);
 static EMPTY_OBJECT_TY: &InferredTy<'static> = &InferredTy::Object(&[]);
 
-fn infer_type<'a>(
-    tape: &Tape,
+/// Abstraction over a JSON value that is only concerned with the
+/// type of the value rather than the value itself
+trait JsonValue<'a>: Debug + Copy {
+    fn get(&self) -> JsonType;
+
+    fn elements(&self) -> impl Iterator<Item = Self>;
+
+    fn fields(&self) -> impl Iterator<Item = (&'a str, Self)>;
+}
+
+enum JsonType {
+    Null,
+    Bool,
+    Int64,
+    Float64,
+    String,
+    Array,
+    Object,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct TapeValue<'a> {
+    tape: &'a Tape<'a>,
     idx: u32,
-    expect: &'a InferredTy<'a>,
-    arena: &'a Bump,
-) -> Result<&'a InferredTy<'a>> {
+}
+
+fn iter_rows<'a>(tape: &'a Tape<'a>) -> impl Iterator<Item = TapeValue<'a>> {
+    tape.iter_rows().map(move |idx| TapeValue { tape, idx })
+}
+
+impl<'a> JsonValue<'a> for TapeValue<'a> {
+    fn get(&self) -> JsonType {
+        match self.tape.get(self.idx) {
+            TapeElement::Null => JsonType::Null,
+            TapeElement::False => JsonType::Bool,
+            TapeElement::True => JsonType::Bool,
+            TapeElement::I64(_) | TapeElement::I32(_) => JsonType::Int64,
+            TapeElement::F64(_) | TapeElement::F32(_) => JsonType::Float64,
+            TapeElement::Number(s) => {
+                if self.tape.get_string(s).parse::<i64>().is_ok() {
+                    JsonType::Int64
+                } else {
+                    JsonType::Float64
+                }
+            }
+            TapeElement::String(_) => JsonType::String,
+            TapeElement::StartList(_) => JsonType::Array,
+            TapeElement::EndList(_) => unreachable!(),
+            TapeElement::StartObject(_) => JsonType::Object,
+            TapeElement::EndObject(_) => unreachable!(),
+        }
+    }
+
+    fn elements(&self) -> impl Iterator<Item = Self> {
+        self.tape
+            .iter_elements(self.idx)
+            .map(move |idx| Self { idx, ..*self })
+    }
+
+    fn fields(&self) -> impl Iterator<Item = (&'a str, Self)> {
+        self.tape
+            .iter_fields(self.idx)
+            .map(move |(key, idx)| (key, Self { idx, ..*self }))
+    }
+}
+
+impl<'a> JsonValue<'a> for &'a serde_json::Value {
+    fn get(&self) -> JsonType {
+        use serde_json::Value;
+
+        match self {
+            Value::Null => JsonType::Null,
+            Value::Bool(_) => JsonType::Bool,
+            Value::Number(n) => {
+                if n.is_i64() {
+                    JsonType::Int64
+                } else {
+                    JsonType::Float64
+                }
+            }
+            Value::String(_) => JsonType::String,
+            Value::Array(_) => JsonType::Array,
+            Value::Object(_) => JsonType::Object,
+        }
+    }
+
+    fn elements(&self) -> impl Iterator<Item = Self> {
+        use serde_json::Value;
+
+        match self {
+            Value::Array(elements) => elements.iter(),
+            _ => panic!("Expected an array"),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = (&'a str, Self)> {
+        use serde_json::Value;
+
+        match self {
+            Value::Object(fields) => fields.iter().map(|(key, value)| (key.as_str(), value)),
+            _ => panic!("Expected an object"),
+        }
+    }
+}
+
+fn infer_json_type<'a, 't>(
+    value: impl JsonValue<'a>,
+    expected: &'t InferredTy<'t>,
+    arena: &'t Bump,
+) -> Result<&'t InferredTy<'t>> {
     let make_err = |got| {
-        let expected = match expect {
+        let expected = match expected {
             InferredTy::Never => unreachable!(),
             InferredTy::Scalar(_) => "a scalar value",
             InferredTy::Array(_) => "an array",
@@ -266,7 +349,7 @@ fn infer_type<'a>(
     };
 
     let infer_scalar = |scalar: ScalarTy, got: &'static str| {
-        Ok(match expect {
+        Ok(match expected {
             InferredTy::Never => match scalar {
                 ScalarTy::Bool => BOOL_TY,
                 ScalarTy::Int64 => INT64_TY,
@@ -287,50 +370,48 @@ fn infer_type<'a>(
         })
     };
 
-    match tape.get(idx) {
-        TapeElement::Null => Ok(expect),
-        TapeElement::False => infer_scalar(ScalarTy::Bool, "a boolean"),
-        TapeElement::True => infer_scalar(ScalarTy::Bool, "a boolean"),
-        TapeElement::I64(_) | TapeElement::I32(_) => infer_scalar(ScalarTy::Int64, "a number"),
-        TapeElement::F64(_) | TapeElement::F32(_) => infer_scalar(ScalarTy::Float64, "a number"),
-        TapeElement::Number(s) => {
-            if tape.get_string(s).parse::<i64>().is_ok() {
-                infer_scalar(ScalarTy::Int64, "a number")
-            } else {
-                infer_scalar(ScalarTy::Float64, "a number")
-            }
-        }
-        TapeElement::String(_) => infer_scalar(ScalarTy::String, "a string"),
-        TapeElement::StartList(end) => {
-            let (expect, expect_elem) = match *expect {
+    match value.get() {
+        JsonType::Null => Ok(expected),
+        JsonType::Bool => infer_scalar(ScalarTy::Bool, "a boolean"),
+        JsonType::Int64 => infer_scalar(ScalarTy::Int64, "a number"),
+        JsonType::Float64 => infer_scalar(ScalarTy::Float64, "a number"),
+        JsonType::String => infer_scalar(ScalarTy::String, "a string"),
+        JsonType::Array => {
+            println!("zzz: {expected:?} ...");
+            let (expected, expected_elem) = match *expected {
                 InferredTy::Never => (ARRAY_OF_NEVER_TY, NEVER_TY),
-                InferredTy::Array(inner) => (expect, inner),
+                InferredTy::Array(inner) => (expected, inner),
                 _ => Err(make_err("an array"))?,
             };
+            println!("zzz: {expected:?} {expected_elem:?}");
+            println!("has {:?}", value.elements().collect::<Vec<_>>());
 
-            let elem = iter_elements(tape, idx, end).try_fold(expect_elem, |expect, idx| {
-                infer_type(tape, idx, expect, arena)
-            })?;
+            let elem = value
+                .elements()
+                .try_fold(expected_elem, |expected, value| {
+                    let result = infer_json_type(value, expected, arena);
+                    println!("infer array: {expected:?} + {value:?} = {result:?}");
+                    result
+                })?;
 
-            Ok(if std::ptr::eq(elem, expect_elem) {
-                expect
+            Ok(if std::ptr::eq(elem, expected_elem) {
+                expected
             } else {
                 arena.alloc(InferredTy::Array(elem))
             })
         }
-        TapeElement::EndList(_) => unreachable!(),
-        TapeElement::StartObject(end) => {
-            let (expect, expect_fields) = match *expect {
+        JsonType::Object => {
+            let (expected, expected_fields) = match *expected {
                 InferredTy::Never => (EMPTY_OBJECT_TY, &[] as &[_]),
-                InferredTy::Object(fields) => (expect, fields),
+                InferredTy::Object(fields) => (expected, fields),
                 _ => Err(make_err("an object"))?,
             };
 
-            let mut num_fields = expect_fields.len();
-            let mut substs = HashMap::<usize, (&'a str, &'a InferredTy<'a>)>::new();
+            let mut num_fields = expected_fields.len();
+            let mut substs = HashMap::<usize, (&'t str, &'t InferredTy<'t>)>::new();
 
-            for (key, idx) in iter_fields(tape, idx, end) {
-                let existing_field = expect_fields
+            for (key, value) in value.fields() {
+                let existing_field = expected_fields
                     .iter()
                     .copied()
                     .enumerate()
@@ -338,7 +419,7 @@ fn infer_type<'a>(
 
                 match existing_field {
                     Some((field_idx, (key, expect_ty))) => {
-                        let ty = infer_type(tape, idx, expect_ty, arena)?;
+                        let ty = infer_json_type(value, expect_ty, arena)?;
                         if !std::ptr::eq(ty, expect_ty) {
                             substs.insert(field_idx, (key, ty));
                         }
@@ -347,111 +428,27 @@ fn infer_type<'a>(
                         let field_idx = num_fields;
                         num_fields += 1;
                         let key = arena.alloc_str(key);
-                        let ty = infer_type(tape, idx, NEVER_TY, arena)?;
+                        let ty = infer_json_type(value, NEVER_TY, arena)?;
                         substs.insert(field_idx, (key, ty));
                     }
                 };
             }
 
             Ok(if substs.is_empty() {
-                expect
+                expected
             } else {
                 let fields =
                     arena.alloc_slice_fill_with(num_fields, |idx| match substs.get(&idx) {
                         Some(subst) => *subst,
-                        None => expect_fields[idx],
+                        None => expected_fields[idx],
                     });
                 arena.alloc(InferredTy::Object(fields))
             })
         }
-        TapeElement::EndObject(_) => unreachable!(),
     }
-}
-
-fn iter_elements(tape: &Tape, start: u32, end: u32) -> impl Iterator<Item = u32> {
-    let mut idx = start + 1;
-    std::iter::from_fn(move || {
-        (idx < end).then(|| {
-            let elem_idx = idx;
-            idx = tape.next(idx, "??").unwrap();
-            elem_idx
-        })
-    })
-}
-
-fn iter_fields<'a>(tape: &'a Tape, start: u32, end: u32) -> impl Iterator<Item = (&'a str, u32)> {
-    let mut iter = iter_elements(tape, start, end);
-    std::iter::from_fn(move || {
-        let key_idx = iter.next()?;
-        let key = match tape.get(key_idx) {
-            TapeElement::String(s) => tape.get_string(s),
-            _ => unreachable!(),
-        };
-        let field_idx = iter.next().unwrap();
-        Some((key, field_idx))
-    })
 }
 
 impl<'a> InferredTy<'a> {
-    fn make_array(elem: Self, arena: &'a Bump) -> Self {
-        Self::Array(arena.alloc(elem))
-    }
-
-    fn make_object<I>(fields: I, arena: &'a Bump) -> Self
-    where
-        I: IntoIterator<Item = (&'a str, &'a InferredTy<'a>)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let fields = arena.alloc_slice_fill_iter(fields);
-        Self::Object(fields)
-    }
-
-    fn union(self, other: Self, arena: &'a Bump) -> Result<Self> {
-        Ok(match (self, other) {
-            (ty, Self::Never) | (Self::Never, ty) => ty,
-
-            (Self::Scalar(left), Self::Scalar(right)) => Self::Scalar(ScalarTy::union(left, right)),
-
-            (Self::Array(left), Self::Array(right)) => {
-                let elem = left.union(*right, arena)?;
-                Self::make_array(elem, arena)
-            }
-
-            (Self::Object(left), Self::Object(right)) => Self::union_objects(left, right, arena)?,
-
-            _ => Err(ArrowError::JsonError(format!(
-                "Incompatible type found during schema inference: {self:?} vs {other:?}"
-            )))?,
-        })
-    }
-
-    fn union_objects(
-        left: InferredFields<'a>,
-        right: InferredFields<'a>,
-        arena: &'a Bump,
-    ) -> Result<Self> {
-        let mut fields = IndexMap::new();
-
-        for (key, ty) in left.iter().copied() {
-            fields.insert(key, ty);
-        }
-
-        for (key, ty) in right.iter().copied() {
-            use indexmap::map::Entry;
-            match fields.entry(key) {
-                Entry::Occupied(mut entry) => {
-                    let merged = &*arena.alloc(entry.get().union(*ty, arena)?);
-                    entry.insert(merged);
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(ty);
-                }
-            }
-        }
-
-        Ok(Self::make_object(fields, arena))
-    }
-
     fn into_datatype(self) -> DataType {
         match self {
             Self::Never => DataType::Null,
@@ -488,15 +485,6 @@ impl<'a> InferredTy<'a> {
 }
 
 impl ScalarTy {
-    fn union(left: Self, right: Self) -> Self {
-        match (left, right) {
-            _ if left == right => left,
-            (Self::Int64, Self::Float64) => Self::Float64,
-            (Self::Float64, Self::Int64) => Self::Float64,
-            _ => Self::String,
-        }
-    }
-
     fn into_datatype(self) -> DataType {
         match self {
             Self::Bool => DataType::Boolean,
@@ -505,39 +493,6 @@ impl ScalarTy {
             Self::String => DataType::Utf8,
         }
     }
-}
-
-fn infer_json_type<'a>(value: &Value, arena: &'a Bump) -> Result<InferredTy<'a>> {
-    Ok(match value {
-        Value::Null => InferredTy::Never,
-        Value::Bool(_) => InferredTy::Scalar(ScalarTy::Bool),
-        Value::Number(n) => {
-            if n.is_i64() {
-                InferredTy::Scalar(ScalarTy::Int64)
-            } else {
-                InferredTy::Scalar(ScalarTy::Float64)
-            }
-        }
-        Value::String(_) => InferredTy::Scalar(ScalarTy::String),
-        Value::Array(elements) => {
-            let elem_ty = elements
-                .iter()
-                .map(|value| infer_json_type(value, arena))
-                .try_fold(InferredTy::Never, |a, b| a.union(b?, arena))?;
-            InferredTy::make_array(elem_ty, arena)
-        }
-        Value::Object(fields) => {
-            let fields = fields
-                .iter()
-                .map(|(key, value)| {
-                    let key = &*arena.alloc_str(key);
-                    let value = &*arena.alloc(infer_json_type(value, arena)?);
-                    Ok((key, value))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            InferredTy::make_object(fields, arena)
-        }
-    })
 }
 
 #[cfg(test)]
