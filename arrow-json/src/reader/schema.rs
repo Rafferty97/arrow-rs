@@ -22,7 +22,7 @@ use arrow_schema::{ArrowError, Schema};
 use bumpalo::Bump;
 use serde_json::Value;
 
-use super::tape::TapeDecoder;
+use super::tape::{TapeDecoder, TapeDecoderOptions};
 use infer::{ANY_TY, EMPTY_OBJECT_TY, InferredType, TapeValue, infer_json_type};
 
 mod infer;
@@ -129,8 +129,7 @@ pub fn infer_json_schema<R: BufRead>(
 ///
 /// The following type coercion logic is implemented:
 /// * `Int64` and `Float64` are converted to `Float64`
-/// * Lists and scalars are coerced to a list of a compatible scalar
-/// * All other cases are coerced to `Utf8` (String)
+/// * Incompatible scalars are coerced to `Utf8` (String)
 ///
 /// Note that the above coercion logic is different from what Spark has, where it would default to
 /// String type in case of List and Scalar values appeared in the same field.
@@ -155,7 +154,7 @@ where
 
 struct SchemaDecoder<'a> {
     decoder: TapeDecoder,
-    max_read_records: Option<usize>,
+    max_read_records: usize,
     record_count: usize,
     schema: InferredType<'a>,
     arena: &'a Bump,
@@ -163,8 +162,14 @@ struct SchemaDecoder<'a> {
 
 impl<'a> SchemaDecoder<'a> {
     pub fn new(max_read_records: Option<usize>, arena: &'a Bump) -> Self {
+        let max_read_records = max_read_records.unwrap_or(usize::MAX);
+
         Self {
-            decoder: TapeDecoder::new(1024, 8),
+            decoder: TapeDecoder::new(TapeDecoderOptions {
+                batch_size: max_read_records.min(1024),
+                num_fields: 8,
+                flatten_top_level_arrays: false,
+            }),
             max_read_records,
             record_count: 0,
             schema: ANY_TY,
@@ -188,14 +193,10 @@ impl<'a> SchemaDecoder<'a> {
     fn infer_batch(&mut self) -> Result<(), ArrowError> {
         let tape = self.decoder.finish()?;
 
-        let remaining_records = self
-            .max_read_records
-            .map_or(usize::MAX, |max| max - self.record_count);
-
         let records = tape
             .iter_rows()
             .map(|idx| TapeValue::new(&tape, idx))
-            .take(remaining_records);
+            .take(self.max_read_records - self.record_count);
 
         for record in records {
             self.schema = infer_json_type(record, self.schema, self.arena)?;
