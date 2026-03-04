@@ -204,10 +204,12 @@ impl<'t> InferredType<'t> {
     }
 
     pub fn into_schema(self) -> Result<Schema, ArrowError> {
-        let TyKind::Object(fields) = self.kind() else {
-            Err(ArrowError::JsonError(format!(
-                "Expected JSON object, found {self:?}",
-            )))?
+        let fields = match self.kind() {
+            TyKind::Any => &[],
+            TyKind::Object(fields) => *fields,
+            other => Err(ArrowError::JsonError(format!(
+                "Expected JSON object, found {other:?}",
+            )))?,
         };
 
         let fields = fields

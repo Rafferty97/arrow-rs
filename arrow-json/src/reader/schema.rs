@@ -509,4 +509,18 @@ mod tests {
         )]);
         assert_eq!(inferred_schema, schema);
     }
+
+    #[test]
+    fn test_infer_empty_array() {
+        let (inferred_schema, _) = infer_json_schema_with_options(
+            b"[]" as &[u8],
+            InferJsonSchemaOptions {
+                flatten_top_level_arrays: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let schema = Schema::new([]);
+        assert_eq!(inferred_schema, schema);
+    }
 }
