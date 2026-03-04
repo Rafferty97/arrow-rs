@@ -17,6 +17,7 @@
 
 use std::borrow::Borrow;
 use std::io::{BufRead, Seek};
+use std::sync::Arc;
 
 use arrow_schema::{ArrowError, Schema};
 use serde_json::Value;
@@ -29,6 +30,39 @@ use super::tape::TapeDecoder;
 
 mod infer;
 mod json_type;
+
+/// Configures how to infer the [`Schema`] of a JSON file.
+#[derive(Clone, Default)]
+pub struct InferJsonSchemaOptions {
+    /// The maximum number of records to read to infer the schema.
+    ///
+    /// If set to `None`, the whole file will be read. Defaults to `None`.
+    pub max_read_records: Option<usize>,
+    /// The estimated number of fields per row, if known.
+    ///
+    /// This is purely an optimization hint, with no effect on the output schema.
+    pub num_fields: Option<usize>,
+    /// Whether to flatten top-level arrays such that their elements
+    /// are treated as individual rows.
+    ///
+    /// See [`ReaderBuilder::with_flatten`] for more detail. Defaults to `false`.
+    ///
+    /// [`ReaderBuilder::with_flatten`]: super::ReaderBuilder::with_flatten
+    pub flatten_top_level_arrays: bool,
+    /// Whether to treat each row as the value for a single field in
+    /// the resulting schema. This allows each row of the file to contain
+    /// any JSON value rather than requiring an object.
+    ///
+    /// * If set to `Some(name)`, the resulting schema wil contain a single field
+    ///   called `name` whose type is the type of each row in the JSON file.
+    /// * If set to `None`, then each row of the JSON file is expected to be an object,
+    ///   whose keys will become the fields in the resulting schema.
+    ///
+    /// See [`ReaderBuilder::new_with_field`] for more detail. Defaults to `None`.
+    ///
+    /// [`ReaderBuilder::new_with_field`]: super::ReaderBuilder::new_with_field
+    pub single_field: Option<String>,
+}
 
 /// Infer the fields of a JSON file by reading the first n records of the file, with
 /// `max_read_records` controlling the maximum number of records to read.
@@ -70,7 +104,7 @@ pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
 ///
 /// If `max_read_records` is not set, the whole file is read to infer its field types.
 ///
-/// Returns inferred schema and number of records read.
+/// Returns the inferred schema and number of records read.
 ///
 /// This function will not seek back to the start of the `reader`. The user has to manage the
 /// original file's cursor. This function is useful when the `reader`'s cursor is not available
@@ -103,10 +137,54 @@ pub fn infer_json_schema_from_seekable<R: BufRead + Seek>(
 /// file.seek(SeekFrom::Start(0)).unwrap();
 /// ```
 pub fn infer_json_schema<R: BufRead>(
-    mut reader: R,
+    reader: R,
     max_read_records: Option<usize>,
 ) -> Result<(Schema, usize), ArrowError> {
-    let mut decoder = SchemaDecoder::new(max_read_records);
+    infer_json_schema_with_options(
+        reader,
+        InferJsonSchemaOptions {
+            max_read_records,
+            ..Default::default()
+        },
+    )
+}
+
+/// Infer the fields of a JSON file by reading the first n records of the buffer.
+///
+/// Returns the inferred schema and number of records read.
+///
+/// This function will not seek back to the start of the `reader`. The user has to manage the
+/// original file's cursor. This function is useful when the `reader`'s cursor is not available
+/// (does not implement [`Seek`]), such is the case for compressed streams decoders.
+///
+///
+/// Note that JSON is not able to represent all Arrow data types exactly. So the inferred schema
+/// might be different from the schema of the original data that was encoded as JSON. For example,
+/// JSON does not have different integer types, so all integers are inferred as `Int64`. Another
+/// example is binary data, which is encoded as a [Base16] string in JSON and therefore inferred
+/// as String type by this function.
+///
+/// [Base16]: https://en.wikipedia.org/wiki/Base16#Base16
+///
+/// # Examples
+/// ```
+/// use arrow_json::reader::{infer_json_schema_with_options, InferJsonSchemaOptions};
+///
+/// let mut file = std::fs::File::open("test/data/arrays.json").unwrap();
+/// let mut reader = std::io::BufReader::new(file);
+///
+/// let options = InferJsonSchemaOptions {
+///     max_read_records: Some(512),
+///     single_field: Some("data".into()),
+///     ..Default::default()
+/// };
+/// let inferred_schema = infer_json_schema_with_options(&mut reader, options).unwrap();
+/// ```
+pub fn infer_json_schema_with_options<R: BufRead>(
+    mut reader: R,
+    options: InferJsonSchemaOptions,
+) -> Result<(Schema, usize), ArrowError> {
+    let mut decoder = SchemaDecoder::new(options);
 
     loop {
         let buf = reader.fill_buf()?;
@@ -155,25 +233,34 @@ where
 
 struct SchemaDecoder {
     decoder: TapeDecoder,
-    max_read_records: Option<usize>,
+    single_field: Option<String>,
+    max_read_records: usize,
     record_count: usize,
     schema: InferTy,
 }
 
 impl SchemaDecoder {
-    pub fn new(max_read_records: Option<usize>) -> Self {
+    pub fn new(options: InferJsonSchemaOptions) -> Self {
+        let max_read_records = options.max_read_records.unwrap_or(usize::MAX);
+
         let decoder = TapeDecoder::new(TapeDecoderOptions {
             // Use a sensible batch size, capped to `max_read_records`
-            batch_size: 1024.min(max_read_records.unwrap_or(usize::MAX)),
+            batch_size: max_read_records.min(1024),
             num_fields: 8,
-            flatten_top_level_arrays: false,
+            flatten_top_level_arrays: options.flatten_top_level_arrays,
         });
+
+        let schema = match &options.single_field {
+            Some(_) => InferTy::Any,
+            None => InferTy::empty_object(),
+        };
 
         Self {
             decoder,
+            single_field: options.single_field,
             max_read_records,
             record_count: 0,
-            schema: InferTy::empty_object(),
+            schema,
         }
     }
 
@@ -186,26 +273,27 @@ impl SchemaDecoder {
     }
 
     pub fn has_read_max_records(&self) -> bool {
-        self.max_read_records
-            .map_or(false, |max| self.record_count >= max)
+        self.record_count >= self.max_read_records
     }
 
     pub fn finish(mut self) -> Result<(Schema, usize), ArrowError> {
         self.infer_batch()?;
-        Ok((self.schema.into_schema()?, self.record_count))
+        match self.single_field {
+            Some(name) => {
+                let field = Arc::new(self.schema.to_field(name));
+                Ok((Schema::new([field]), self.record_count))
+            }
+            None => Ok((self.schema.into_schema()?, self.record_count)),
+        }
     }
 
     fn infer_batch(&mut self) -> Result<(), ArrowError> {
         let tape = self.decoder.finish()?;
 
-        let remaining_records = self
-            .max_read_records
-            .map_or(usize::MAX, |max| max - self.record_count);
-
         let records = tape
             .iter_rows()
             .map(|idx| TapeValue::new(&tape, idx))
-            .take(remaining_records);
+            .take(self.max_read_records - self.record_count);
 
         for record in records {
             if record.get() == JsonType::Null {
@@ -448,6 +536,20 @@ mod tests {
         let (schema, record_count) = infer_json_schema(Cursor::new(data), Some(1)).unwrap();
         assert_eq!(record_count, 1);
         assert_eq!(schema.field(0), &Field::new("a", DataType::Int64, true));
+    }
+
+    #[test]
+    fn test_infer_empty_array() {
+        let (inferred_schema, _) = infer_json_schema_with_options(
+            b"[]" as &[u8],
+            InferJsonSchemaOptions {
+                flatten_top_level_arrays: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let schema = Schema::new([]);
+        assert_eq!(inferred_schema, schema);
     }
 
     /// Shorthand for building list data type of `ty`
