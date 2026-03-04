@@ -3016,7 +3016,41 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_top_level_arrays() {
+    fn test_infer_flatten_top_level_arrays() {
+        let buf = r#"
+            [
+                { "a": 1, "b": [1, 2, 3] },
+                { "a": 2, "b": [7, 8] }
+            ]
+            [
+                { "a": 1, "b": null },
+                { "a": 2, "b": [4, 5, 6] }
+            ]
+            "#;
+
+        let (schema, read) = infer_json_schema_with_options(
+            BufReader::new(buf.as_bytes()),
+            InferJsonSchemaOptions {
+                flatten_top_level_arrays: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(read, 4);
+        assert_eq!(schema.fields[0].name(), "a");
+        assert_eq!(schema.fields[0].data_type(), &DataType::Int64);
+        assert_eq!(schema.fields[0].is_nullable(), true);
+        assert_eq!(schema.fields[1].name(), "b");
+        assert_eq!(
+            schema.fields[1].data_type(),
+            &DataType::new_list(DataType::Int64, true)
+        );
+        assert_eq!(schema.fields[1].is_nullable(), true);
+    }
+
+    #[test]
+    fn test_read_flatten_top_level_arrays() {
         let buf = r#"
             [
                 {"a": 1},
@@ -3036,5 +3070,68 @@ mod tests {
         for i in 0..6 {
             assert_eq!(col.value(i), (i as i32) + 1);
         }
+    }
+
+    #[test]
+    fn test_infer_signle_field() {
+        let buf = r#"
+            [{ "foo": 5, "bar": false }, { "foo": 2, "bar": true }]
+            [{ "foo": 2, "bar": true }, { "foo": 7, "bar": false }]
+            [{ "foo": null, "bar": false }, { "foo": 28, "bar": null }]
+            "#;
+
+        let (schema, read) = infer_json_schema_with_options(
+            BufReader::new(buf.as_bytes()),
+            InferJsonSchemaOptions {
+                single_field: Some("arr".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(read, 3);
+        assert_eq!(schema.fields[0].name(), "arr");
+        assert_eq!(
+            schema.fields[0].data_type(),
+            &DataType::new_list(
+                DataType::Struct(
+                    vec![
+                        Field::new("foo", DataType::Int64, true),
+                        Field::new("bar", DataType::Boolean, true),
+                    ]
+                    .into()
+                ),
+                true
+            )
+        );
+        assert_eq!(schema.fields[0].is_nullable(), true);
+    }
+
+    #[test]
+    fn test_read_single_field() {
+        let buf = r#"
+            [{ "foo": 5, "bar": false }, { "foo": 2, "bar": true }]
+            [{ "foo": 2, "bar": true }, { "foo": 7, "bar": false }]
+            [{ "foo": null, "bar": false }, { "foo": 28, "bar": null }]
+            "#;
+
+        let field = Field::new(
+            "arr",
+            DataType::new_list(
+                DataType::Struct(
+                    vec![
+                        Field::new("foo", DataType::Int64, true),
+                        Field::new("bar", DataType::Boolean, true),
+                    ]
+                    .into(),
+                ),
+                true,
+            ),
+            true,
+        );
+
+        let batches = do_read_config(buf, ReaderBuilder::new_with_field(field));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
     }
 }
