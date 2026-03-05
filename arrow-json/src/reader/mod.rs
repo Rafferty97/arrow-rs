@@ -3073,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_signle_field() {
+    fn test_infer_single_field() {
         let buf = r#"
             [{ "foo": 5, "bar": false }, { "foo": 2, "bar": true }]
             [{ "foo": 2, "bar": true }, { "foo": 7, "bar": false }]
