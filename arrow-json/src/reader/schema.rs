@@ -21,6 +21,8 @@ use std::io::{BufRead, Seek};
 use arrow_schema::{ArrowError, Schema};
 use serde_json::Value;
 
+use crate::reader::tape::TapeDecoderOptions;
+
 use self::infer::{InferTy, infer_json_type};
 use self::json_type::{JsonType, JsonValue, TapeValue};
 use super::tape::TapeDecoder;
@@ -160,12 +162,15 @@ struct SchemaDecoder {
 
 impl SchemaDecoder {
     pub fn new(max_read_records: Option<usize>) -> Self {
-        // Use a sensible batch size, capped to `max_read_records`
-        let batch_size = 1024.min(max_read_records.unwrap_or(usize::MAX));
-        println!("batch_size = {batch_size}");
+        let decoder = TapeDecoder::new(TapeDecoderOptions {
+            // Use a sensible batch size, capped to `max_read_records`
+            batch_size: 1024.min(max_read_records.unwrap_or(usize::MAX)),
+            num_fields: 8,
+            flatten_top_level_arrays: false,
+        });
 
         Self {
-            decoder: TapeDecoder::new(batch_size, 8),
+            decoder,
             max_read_records,
             record_count: 0,
             schema: InferTy::empty_object(),
@@ -424,7 +429,6 @@ mod tests {
         let mut data = "{}\n".repeat(2048);
         data.push_str("{\"late\":true}\n");
         let (schema, _) = infer_json_schema(Cursor::new(data), None).unwrap();
-        println!("{schema:?}");
         assert_eq!(
             schema.field(0),
             &Field::new("late", DataType::Boolean, true)
